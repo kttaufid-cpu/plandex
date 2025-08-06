@@ -36,7 +36,7 @@ func init() {
 }
 
 func InitPlan(orgId, planId string) error {
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 	err := os.MkdirAll(dir, os.ModePerm)
 
 	if err != nil {
@@ -65,7 +65,7 @@ func InitPlan(orgId, planId string) error {
 }
 
 func DeletePlanDir(orgId, planId string) error {
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 	err := os.RemoveAll(dir)
 
 	if err != nil {
@@ -87,26 +87,26 @@ func getProjectMapCacheDir(orgId, projectId string) string {
 	return filepath.Join(getProjectDir(orgId, projectId), "map_cache")
 }
 
-func getPlanDir(orgId, planId string) string {
+func GetPlanDir(orgId, planId string) string {
 	return filepath.Join(getOrgDir(orgId), "plans", planId)
 }
 
 func getPlanContextDir(orgId, planId string) string {
-	return filepath.Join(getPlanDir(orgId, planId), "context")
+	return filepath.Join(GetPlanDir(orgId, planId), "context")
 }
 
 func getPlanConversationDir(orgId, planId string) string {
-	return filepath.Join(getPlanDir(orgId, planId), "conversation")
+	return filepath.Join(GetPlanDir(orgId, planId), "conversation")
 }
 
 func getPlanResultsDir(orgId, planId string) string {
-	return filepath.Join(getPlanDir(orgId, planId), "results")
+	return filepath.Join(GetPlanDir(orgId, planId), "results")
 }
 
 func getPlanAppliesDir(orgId, planId string) string {
-	return filepath.Join(getPlanDir(orgId, planId), "applies")
+	return filepath.Join(GetPlanDir(orgId, planId), "applies")
 }
 
 func getPlanDescriptionsDir(orgId, planId string) string {
-	return filepath.Join(getPlanDir(orgId, planId), "descriptions")
+	return filepath.Join(GetPlanDir(orgId, planId), "descriptions")
 }

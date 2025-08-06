@@ -458,7 +458,7 @@ func lockRepoDB(params LockRepoParams, numRetry int) (string, error) {
 
 	// check if git lock file exists
 	// remove it if so
-	err = gitRemoveIndexLockFileIfExists(getPlanDir(orgId, planId))
+	err = gitRemoveIndexLockFileIfExists(GetPlanDir(orgId, planId))
 	if err != nil {
 		log.Printf("[Lock] %s | %s | Error removing lock file: %v", planId, params.Reason, err)
 		return newLock.Id, fmt.Errorf("error removing lock file: %v", err)
@@ -466,7 +466,7 @@ func lockRepoDB(params LockRepoParams, numRetry int) (string, error) {
 
 	if branch != "" {
 		// checkout the branch
-		err = gitCheckoutBranch(getPlanDir(orgId, planId), branch)
+		err = gitCheckoutBranch(GetPlanDir(orgId, planId), branch)
 		if err != nil {
 			log.Printf("[Lock] %s | %s | Error checking out branch: %v", planId, params.Reason, err)
 			return newLock.Id, fmt.Errorf("error checking out branch: %v", err)

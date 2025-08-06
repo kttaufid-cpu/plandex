@@ -35,7 +35,7 @@ type GitRepo struct {
 }
 
 func InitGitRepo(orgId, planId string) error {
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 	return initGitRepo(dir)
 }
 
@@ -69,7 +69,7 @@ func (repo *GitRepo) GitAddAndCommit(branch, message string) error {
 	orgId := repo.orgId
 	planId := repo.planId
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	err := gitWriteOperation(func() error {
 		return gitAdd(dir, ".")
@@ -96,7 +96,7 @@ func (repo *GitRepo) GitRewindToSha(branch, sha string) error {
 	orgId := repo.orgId
 	planId := repo.planId
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	err := gitWriteOperation(func() error {
 		return gitRewindToSha(dir, sha)
@@ -112,7 +112,7 @@ func (repo *GitRepo) GetCurrentCommitSha() (sha string, err error) {
 	orgId := repo.orgId
 	planId := repo.planId
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	cmd := exec.Command("git", "-C", dir, "rev-parse", "HEAD")
 	output, err := cmd.Output()
@@ -128,7 +128,7 @@ func (repo *GitRepo) GetCommitTime(branch, ref string) (time.Time, error) {
 	orgId := repo.orgId
 	planId := repo.planId
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	// Use git show to get the commit timestamp
 	cmd := exec.Command("git", "-C", dir, "show", "-s", "--format=%ct", ref)
@@ -152,7 +152,7 @@ func (repo *GitRepo) GitResetToSha(sha string) error {
 	orgId := repo.orgId
 	planId := repo.planId
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	err := gitWriteOperation(func() error {
 		cmd := exec.Command("git", "-C", dir, "reset", "--hard", sha)
@@ -175,7 +175,7 @@ func (repo *GitRepo) GitCheckoutSha(sha string) error {
 	orgId := repo.orgId
 	planId := repo.planId
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	err := gitWriteOperation(func() error {
 		cmd := exec.Command("git", "-C", dir, "checkout", sha)
@@ -198,7 +198,7 @@ func (repo *GitRepo) GetGitCommitHistory(branch string) (body string, shas []str
 	orgId := repo.orgId
 	planId := repo.planId
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	body, shas, err = getGitCommitHistory(dir)
 	if err != nil {
@@ -212,7 +212,7 @@ func (repo *GitRepo) GetLatestCommit(branch string) (sha, body string, err error
 	orgId := repo.orgId
 	planId := repo.planId
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	sha, body, err = getLatestCommit(dir)
 	if err != nil {
@@ -226,7 +226,7 @@ func (repo *GitRepo) GetLatestCommitShaBeforeTime(branch string, before time.Tim
 	orgId := repo.orgId
 	planId := repo.planId
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	log.Printf("ADMIN - GetLatestCommitShaBeforeTime - dir: %s, before: %s", dir, before.Format("2006-01-02T15:04:05Z"))
 
@@ -266,7 +266,7 @@ func (repo *GitRepo) GitListBranches() ([]string, error) {
 	orgId := repo.orgId
 	planId := repo.planId
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	var out bytes.Buffer
 	cmd := exec.Command("git", "branch", "--format=%(refname:short)")
@@ -290,7 +290,7 @@ func (repo *GitRepo) GitCreateBranch(newBranch string) error {
 	orgId := repo.orgId
 	planId := repo.planId
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	err := gitWriteOperation(func() error {
 		res, err := exec.Command("git", "-C", dir, "checkout", "-b", newBranch).CombinedOutput()
@@ -312,7 +312,7 @@ func (repo *GitRepo) GitDeleteBranch(branchName string) error {
 	orgId := repo.orgId
 	planId := repo.planId
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	err := gitWriteOperation(func() error {
 		res, err := exec.Command("git", "-C", dir, "branch", "-D", branchName).CombinedOutput()
@@ -336,7 +336,7 @@ func (repo *GitRepo) GitClearUncommittedChanges(branch string) error {
 
 	log.Printf("[Git] GitClearUncommittedChanges - orgId: %s, planId: %s, branch: %s", orgId, planId, branch)
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	// first do a lightweight git status to check if there are any uncommitted changes
 	// prevents heavier operations below if there are no changes (the usual case)
@@ -386,7 +386,7 @@ func (repo *GitRepo) GitCheckoutBranch(branch string) error {
 	orgId := repo.orgId
 	planId := repo.planId
 
-	dir := getPlanDir(orgId, planId)
+	dir := GetPlanDir(orgId, planId)
 
 	err := gitWriteOperation(func() error {
 		return gitCheckoutBranch(dir, branch)
@@ -690,7 +690,7 @@ func gitWriteOperation(operation func() error, repoDir, label string) error {
 //   - A directory listing of refs/heads
 //   - A directory listing of .git/ (to spot any leftover lock files or HEAD files)
 func (repo *GitRepo) LogGitRepoState() {
-	repoDir := getPlanDir(repo.orgId, repo.planId)
+	repoDir := GetPlanDir(repo.orgId, repo.planId)
 
 	log.Println("[DEBUG] --- Git Repo State ---")
 

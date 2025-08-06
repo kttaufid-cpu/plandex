@@ -32,8 +32,8 @@ func CreateAccount(name, email, emailVerificationId string, tx *sqlx.Tx) (*Creat
 		return nil, fmt.Errorf("error creating auth token: %v", err)
 	}
 
-	// skipping email verification in local mode
-	if !isLocalMode {
+	// skipping email verification in local mode or when no verification ID provided (test mode)
+	if !isLocalMode && emailVerificationId != "" {
 		// update email verification with user and auth token ids
 		_, err = tx.Exec("UPDATE email_verifications SET user_id = $1, auth_token_id = $2 WHERE id = $3", userId, authTokenId, emailVerificationId)
 
