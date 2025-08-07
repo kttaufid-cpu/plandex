@@ -23,73 +23,81 @@ import (
 func CreatePlan(ctx context.Context, orgId, projectId, userId, name string) (*Plan, error) {
 	var plan *Plan
 	err := WithTx(ctx, "create plan", func(tx *sqlx.Tx) error {
-
-		planConfig, err := GetDefaultPlanConfig(userId)
-
+		res, err := CreatePlanWithTx(ctx, orgId, projectId, userId, name, tx)
 		if err != nil {
-			return fmt.Errorf("error getting default plan config: %v", err)
+			return err
 		}
-
-		query := `INSERT INTO plans (org_id, owner_id, project_id, name, plan_config) 
-	VALUES ($1, $2, $3, $4, $5)
-	RETURNING id, created_at, updated_at`
-
-		plan = &Plan{
-			OrgId:      orgId,
-			OwnerId:    userId,
-			ProjectId:  projectId,
-			Name:       name,
-			PlanConfig: planConfig,
-		}
-
-		err = tx.QueryRow(
-			query,
-			orgId,
-			userId,
-			projectId,
-			name,
-			planConfig,
-		).Scan(
-			&plan.Id,
-			&plan.CreatedAt,
-			&plan.UpdatedAt,
-		)
-
-		if err != nil {
-			return fmt.Errorf("error creating plan: %v", err)
-		}
-
-		_, err = tx.Exec("INSERT INTO lockable_plan_ids (plan_id) VALUES ($1)", plan.Id)
-
-		if err != nil {
-			return fmt.Errorf("error inserting lockable plan id: %v", err)
-		}
-
-		// the one place where we do this to skip the locking queue
-		// ok to cheat this once since we're creating a new plan
-		repo := getGitRepo(orgId, plan.Id)
-		_, err = CreateBranch(repo, plan, nil, "main", tx)
-
-		if err != nil {
-			return fmt.Errorf("error creating main branch: %v", err)
-		}
-
-		log.Println("Created branch main")
-
-		err = InitPlan(orgId, plan.Id)
-
-		if err != nil {
-			return fmt.Errorf("error initializing plan dir: %v", err)
-		}
-
-		log.Println("Initialized plan dir")
-
+		plan = res
 		return nil
 	})
 
 	if err != nil {
 		return nil, err
 	}
+
+	return plan, nil
+}
+
+func CreatePlanWithTx(ctx context.Context, orgId, projectId, userId, name string, tx *sqlx.Tx) (*Plan, error) {
+	planConfig, err := GetDefaultPlanConfig(userId)
+
+	if err != nil {
+		return nil, fmt.Errorf("error getting default plan config: %v", err)
+	}
+
+	query := `INSERT INTO plans (org_id, owner_id, project_id, name, plan_config) 
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, created_at, updated_at`
+
+	plan := &Plan{
+		OrgId:      orgId,
+		OwnerId:    userId,
+		ProjectId:  projectId,
+		Name:       name,
+		PlanConfig: planConfig,
+	}
+
+	err = tx.QueryRow(
+		query,
+		orgId,
+		userId,
+		projectId,
+		name,
+		planConfig,
+	).Scan(
+		&plan.Id,
+		&plan.CreatedAt,
+		&plan.UpdatedAt,
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("error creating plan: %v", err)
+	}
+
+	_, err = tx.Exec("INSERT INTO lockable_plan_ids (plan_id) VALUES ($1)", plan.Id)
+
+	if err != nil {
+		return nil, fmt.Errorf("error inserting lockable plan id: %v", err)
+	}
+
+	// the one place where we do this to skip the locking queue
+	// ok to cheat this once since we're creating a new plan
+	repo := getGitRepo(orgId, plan.Id)
+	_, err = CreateBranch(repo, plan, nil, "main", tx)
+
+	if err != nil {
+		return nil, fmt.Errorf("error creating main branch: %v", err)
+	}
+
+	log.Println("Created branch main")
+
+	err = InitPlan(orgId, plan.Id)
+
+	if err != nil {
+		return nil, fmt.Errorf("error initializing plan dir: %v", err)
+	}
+
+	log.Println("Initialized plan dir")
 
 	return plan, nil
 }
