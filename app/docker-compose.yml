@@ -9,7 +9,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - plandex-db:/var/lib/postgresql/data
+      - plandex-db:/var/lib/postgresql
     networks:
       - plandex-network
   plandex-server:
