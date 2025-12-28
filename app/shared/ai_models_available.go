@@ -701,7 +701,8 @@ func init() {
 			panic("api key or auth settings are not set")
 		}
 
-		if model.BaseUrl == "" {
+		// Skip BaseUrl validation for Azure since the URL is constructed dynamically from AZURE_API_BASE
+		if model.BaseUrl == "" && model.Provider != ModelProviderAzureOpenAI {
 			spew.Dump(model)
 			panic("base url is not set")
 		}

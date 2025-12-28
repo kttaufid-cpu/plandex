@@ -167,7 +167,7 @@ var BuiltInModelProviderConfigs = map[ModelProvider]ModelProviderConfigSchema{
 	},
 	ModelProviderAzureOpenAI: {
 		Provider:     ModelProviderAzureOpenAI,
-		BaseUrl:      LiteLLMBaseUrl,
+		BaseUrl:      "", // URL is constructed dynamically from AZURE_API_BASE for direct Azure OpenAI API calls
 		ApiKeyEnvVar: AzureOpenAIEnvVar,
 		ExtraAuthVars: []ModelProviderExtraAuthVars{
 			{
