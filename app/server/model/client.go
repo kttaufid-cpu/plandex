@@ -43,6 +43,13 @@ type ClientInfo struct {
 	OpenAIOrgId    string
 }
 
+// AzureOpenAIConfig holds Azure-specific configuration for direct API calls
+type AzureOpenAIConfig struct {
+	APIBase        string // Azure resource endpoint (e.g., https://your-resource.openai.azure.com)
+	DeploymentName string // Azure deployment name
+	APIVersion     string // Azure API version (e.g., 2025-04-01-preview)
+}
+
 func InitClients(authVars map[string]string, settings *shared.PlanSettings, orgUserConfig *shared.OrgUserConfig) map[string]ClientInfo {
 	clients := make(map[string]ClientInfo)
 	providers := shared.GetProvidersForAuthVars(authVars, settings, orgUserConfig)
@@ -233,6 +240,54 @@ func createChatCompletionStreamExtended(
 		log.Println("Creating chat completion stream with direct OpenAI provider request")
 	}
 
+	// Azure OpenAI specific configuration for direct API calls
+	var azureConfig *AzureOpenAIConfig
+	if baseModelConfig.Provider == shared.ModelProviderAzureOpenAI {
+		azureConfig = &AzureOpenAIConfig{}
+
+		if authVars["AZURE_API_BASE"] != "" {
+			azureConfig.APIBase = authVars["AZURE_API_BASE"]
+		}
+
+		azureConfig.APIVersion = shared.DefaultAzureApiVersion
+		if authVars["AZURE_API_VERSION"] != "" {
+			azureConfig.APIVersion = authVars["AZURE_API_VERSION"]
+		}
+
+		// Get deployment name from model name
+		modelName := string(extendedReq.Model)
+		modelName = strings.ReplaceAll(modelName, "azure/", "")
+
+		// Check if there's a deployment map
+		if authVars["AZURE_DEPLOYMENTS_MAP"] != "" {
+			var azureDeploymentsMap map[string]string
+			err := json.Unmarshal([]byte(authVars["AZURE_DEPLOYMENTS_MAP"]), &azureDeploymentsMap)
+			if err != nil {
+				return nil, fmt.Errorf("error unmarshalling AZURE_DEPLOYMENTS_MAP: %w", err)
+			}
+			if deploymentName, ok := azureDeploymentsMap[modelName]; ok {
+				log.Println("azure - using deployment name from map:", deploymentName)
+				azureConfig.DeploymentName = deploymentName
+			} else {
+				azureConfig.DeploymentName = modelName
+			}
+		} else {
+			azureConfig.DeploymentName = modelName
+		}
+
+		// For Azure, we use the model name without the azure/ prefix in the request
+		extendedReq.Model = shared.ModelName(modelName)
+
+		// azure uses 'reasoning_effort' field directly
+		if extendedReq.ReasoningConfig != nil {
+			extendedReq.AzureReasoningEffort = extendedReq.ReasoningConfig.Effort
+			extendedReq.ReasoningConfig = nil
+		}
+
+		log.Printf("Azure OpenAI config: base=%s, deployment=%s, version=%s",
+			azureConfig.APIBase, azureConfig.DeploymentName, azureConfig.APIVersion)
+	}
+
 	switch baseModelConfig.Provider {
 	case shared.ModelProviderGoogleVertex:
 		if authVars["VERTEXAI_PROJECT"] != "" {
@@ -243,36 +298,6 @@ func createChatCompletionStreamExtended(
 		}
 		if authVars["GOOGLE_APPLICATION_CREDENTIALS"] != "" {
 			extendedReq.VertexCredentials = authVars["GOOGLE_APPLICATION_CREDENTIALS"]
-		}
-	case shared.ModelProviderAzureOpenAI:
-		if authVars["AZURE_API_BASE"] != "" {
-			extendedReq.LiteLLMApiBase = authVars["AZURE_API_BASE"]
-		}
-		if authVars["AZURE_API_VERSION"] != "" {
-			extendedReq.AzureApiVersion = authVars["AZURE_API_VERSION"]
-		}
-
-		if authVars["AZURE_DEPLOYMENTS_MAP"] != "" {
-			var azureDeploymentsMap map[string]string
-			err := json.Unmarshal([]byte(authVars["AZURE_DEPLOYMENTS_MAP"]), &azureDeploymentsMap)
-			if err != nil {
-				return nil, fmt.Errorf("error unmarshalling AZURE_DEPLOYMENTS_MAP: %w", err)
-			}
-			modelName := string(extendedReq.Model)
-			modelName = strings.ReplaceAll(modelName, "azure/", "")
-
-			deploymentName, ok := azureDeploymentsMap[modelName]
-			if ok {
-				log.Println("azure - deploymentName", deploymentName)
-				modelName = "azure/" + deploymentName
-				extendedReq.Model = shared.ModelName(modelName)
-			}
-		}
-
-		// azure uses 'reasoning_config' instead of 'reasoning' like direct openai api
-		if extendedReq.ReasoningConfig != nil {
-			extendedReq.AzureReasoningEffort = extendedReq.ReasoningConfig.Effort
-			extendedReq.ReasoningConfig = nil
 		}
 	case shared.ModelProviderAmazonBedrock:
 		if authVars["AWS_ACCESS_KEY_ID"] != "" {
@@ -331,9 +356,19 @@ func createChatCompletionStreamExtended(
 
 	// log.Println("request jsonBody", string(jsonBody))
 
-	// Create new request
-	baseUrl := baseModelConfig.BaseUrl
-	url := baseUrl + "/chat/completions"
+	// Create new request - construct URL based on provider
+	var url string
+	if azureConfig != nil && azureConfig.APIBase != "" {
+		// Azure OpenAI uses a different URL pattern:
+		// https://{resource-name}.openai.azure.com/openai/deployments/{deployment-id}/chat/completions?api-version={api-version}
+		azureBase := strings.TrimSuffix(azureConfig.APIBase, "/")
+		url = fmt.Sprintf("%s/openai/deployments/%s/chat/completions?api-version=%s",
+			azureBase, azureConfig.DeploymentName, azureConfig.APIVersion)
+		log.Println("Azure OpenAI URL:", url)
+	} else {
+		baseUrl := baseModelConfig.BaseUrl
+		url = baseUrl + "/chat/completions"
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 	if err != nil {
@@ -346,13 +381,20 @@ func createChatCompletionStreamExtended(
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Connection", "keep-alive")
 
-	// some providers send api key in the body, some in the header
-	// some use other auth methods and so don't have a simple api key
-	if client.ApiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+client.ApiKey)
-	}
-	if client.OpenAIOrgId != "" {
-		req.Header.Set("OpenAI-Organization", client.OpenAIOrgId)
+	// Set authentication headers based on provider
+	if azureConfig != nil && azureConfig.APIBase != "" {
+		// Azure OpenAI uses 'api-key' header instead of 'Authorization: Bearer'
+		if client.ApiKey != "" {
+			req.Header.Set("api-key", client.ApiKey)
+		}
+	} else {
+		// Standard OpenAI and other providers use Bearer token
+		if client.ApiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+client.ApiKey)
+		}
+		if client.OpenAIOrgId != "" {
+			req.Header.Set("OpenAI-Organization", client.OpenAIOrgId)
+		}
 	}
 
 	addOpenRouterHeaders(req)
