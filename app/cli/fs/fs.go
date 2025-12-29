@@ -30,10 +30,42 @@ func init() {
 	}
 	HomeDir = home
 
+	// Determine the config directory using XDG Base Directory Specification
+	// Check $XDG_CONFIG_HOME first, fall back to ~/.config, then legacy ~/.plandex-home-v2
+	configBase := os.Getenv("XDG_CONFIG_HOME")
+	if configBase == "" {
+		configBase = filepath.Join(home, ".config")
+	}
+
+	var plandexSubdir string
 	if os.Getenv("PLANDEX_ENV") == "development" {
-		HomePlandexDir = filepath.Join(home, ".plandex-home-dev-v2")
+		plandexSubdir = "plandex-dev"
 	} else {
-		HomePlandexDir = filepath.Join(home, ".plandex-home-v2")
+		plandexSubdir = "plandex"
+	}
+
+	xdgConfigDir := filepath.Join(configBase, plandexSubdir)
+
+	// Check for legacy directory for backwards compatibility
+	var legacyDir string
+	if os.Getenv("PLANDEX_ENV") == "development" {
+		legacyDir = filepath.Join(home, ".plandex-home-dev-v2")
+	} else {
+		legacyDir = filepath.Join(home, ".plandex-home-v2")
+	}
+
+	// Use legacy directory if it exists and XDG directory doesn't exist yet
+	// This ensures existing users aren't disrupted
+	if _, err := os.Stat(legacyDir); err == nil {
+		if _, err := os.Stat(xdgConfigDir); os.IsNotExist(err) {
+			HomePlandexDir = legacyDir
+		} else {
+			// Both exist, prefer XDG
+			HomePlandexDir = xdgConfigDir
+		}
+	} else {
+		// Legacy doesn't exist, use XDG
+		HomePlandexDir = xdgConfigDir
 	}
 
 	// Create the home plandex directory if it doesn't exist
@@ -42,7 +74,12 @@ func init() {
 		term.OutputErrorAndExit(err.Error())
 	}
 
-	CacheDir = filepath.Join(HomePlandexDir, "cache")
+	// Determine cache directory using XDG Base Directory Specification
+	cacheBase := os.Getenv("XDG_CACHE_HOME")
+	if cacheBase == "" {
+		cacheBase = filepath.Join(home, ".cache")
+	}
+	CacheDir = filepath.Join(cacheBase, plandexSubdir)
 	HomeAuthPath = filepath.Join(HomePlandexDir, "auth.json")
 	HomeAccountsPath = filepath.Join(HomePlandexDir, "accounts.json")
 
