@@ -290,7 +290,11 @@ func withStreamingRetries[T any](
 
 		log.Printf("Error in streaming operation: %v, isFallback: %t, numTotalRetry: %d, numFallbackRetry: %d, numRetry: %d, compareRetries: %d, maxRetries: %d\n", err, isFallback, numTotalRetry, numFallbackRetry, numRetry, compareRetries, maxRetries)
 
-		classifyRes := classifyBasicError(err, fallbackRes.BaseModelConfig.HasClaudeMaxAuth)
+		hasClaudeMaxAuth := false
+		if fallbackRes.BaseModelConfig != nil {
+			hasClaudeMaxAuth = fallbackRes.BaseModelConfig.HasClaudeMaxAuth
+		}
+		classifyRes := classifyBasicError(err, hasClaudeMaxAuth)
 		modelErr = &classifyRes
 
 		newFallback := false
