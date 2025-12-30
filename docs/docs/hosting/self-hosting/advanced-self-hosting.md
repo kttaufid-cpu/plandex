@@ -151,7 +151,17 @@ To resolve this, remove the following in any directory you used the CLI in:
 
 Then run `plandex sign-in` again to create a new account.
 
-If you're still having trouble with accounts, you can also remove the following from your $HOME directory to fully reset them:
+If you're still having trouble with accounts, you can also remove the following to fully reset them:
 
-- `.plandex-home-dev` directory if you ran the CLI with `PLANDEX_ENV=development`
-- `.plandex-home` directory otherwise
+For Plandex v2 (XDG-compliant paths):
+- `$XDG_CONFIG_HOME/plandex/dev-v2` directory if you ran the CLI with `PLANDEX_ENV=development`
+- `$XDG_CONFIG_HOME/plandex/v2` directory otherwise
+- (Default `XDG_CONFIG_HOME` is `~/.config`)
+
+For legacy Plandex v2 installations:
+- `~/.plandex-home-dev-v2` directory if you ran the CLI with `PLANDEX_ENV=development`
+- `~/.plandex-home-v2` directory otherwise
+
+For legacy Plandex v1 installations:
+- `~/.plandex-home-dev` directory if you ran the CLI with `PLANDEX_ENV=development`
+- `~/.plandex-home` directory otherwise
