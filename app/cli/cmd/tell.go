@@ -142,13 +142,21 @@ func getTellPrompt(args []string) string {
 }
 
 func prepareEditorCommand(editor string, filename string) *exec.Cmd {
-	switch editor {
-	case "vim":
-		return exec.Command(editor, "+normal G$", "+startinsert!", filename)
-	case "nano":
-		return exec.Command(editor, "+99999999", filename)
-	default:
+	parts := strings.Fields(editor)
+	if len(parts) == 0 {
 		return exec.Command(editor, filename)
+	}
+
+	editorName := parts[0]
+	editorArgs := parts[1:]
+
+	switch editorName {
+	case "vim":
+		return exec.Command(editorName, append(editorArgs, "+normal G$", "+startinsert!", filename)...)
+	case "nano":
+		return exec.Command(editorName, append(editorArgs, "+99999999", filename)...)
+	default:
+		return exec.Command(editorName, append(editorArgs, filename)...)
 	}
 }
 
