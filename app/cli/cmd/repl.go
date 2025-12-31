@@ -42,6 +42,13 @@ var replConfig *shared.PlanConfig
 
 var sessionId string
 
+func getCommandPrefix() string {
+	if replConfig != nil {
+		return replConfig.GetCommandPrefix()
+	}
+	return "\\"
+}
+
 func init() {
 	RootCmd.AddCommand(replCmd)
 
@@ -49,16 +56,21 @@ func init() {
 	replCmd.Flags().BoolP("tell", "t", false, "Start in tell mode")
 
 	AddNewPlanFlags(replCmd)
+}
 
+func getCliSuggestions() []prompt.Suggest {
+	prefix := getCommandPrefix()
+	suggestions := []prompt.Suggest{}
 	for _, config := range term.CliCommands {
 		if config.Repl {
 			desc := config.Desc
 			if config.Alias != "" {
-				desc = fmt.Sprintf("(\\%s) %s", config.Alias, desc)
+				desc = fmt.Sprintf("(%s%s) %s", prefix, config.Alias, desc)
 			}
-			cliSuggestions = append(cliSuggestions, prompt.Suggest{Text: "\\" + config.Cmd, Description: desc})
+			suggestions = append(suggestions, prompt.Suggest{Text: prefix + config.Cmd, Description: desc})
 		}
 	}
+	return suggestions
 }
 
 func setReplConfig() {
@@ -222,39 +234,40 @@ func runRepl(cmd *cobra.Command, args []string) {
 }
 
 func getSuggestions() []prompt.Suggest {
+	prefix := getCommandPrefix()
 	suggestions := []prompt.Suggest{}
 
 	if lib.CurrentReplState.IsMulti {
 		suggestions = append(suggestions, []prompt.Suggest{
-			{Text: "\\send", Description: "(\\s) Send the current prompt"},
-			{Text: "\\multi", Description: "(\\m) Turn multi-line mode off"},
-			{Text: "\\run", Description: "(\\r) Run a file through tell/chat based on current mode"},
-			{Text: "\\quit", Description: "(\\q) Exit the REPL"},
+			{Text: prefix + "send", Description: "(" + prefix + "s) Send the current prompt"},
+			{Text: prefix + "multi", Description: "(" + prefix + "m) Turn multi-line mode off"},
+			{Text: prefix + "run", Description: "(" + prefix + "r) Run a file through tell/chat based on current mode"},
+			{Text: prefix + "quit", Description: "(" + prefix + "q) Exit the REPL"},
 		}...)
 
 	}
 
 	if lib.CurrentReplState.Mode == lib.ReplModeTell {
 		suggestions = append(suggestions, []prompt.Suggest{
-			{Text: "\\chat", Description: "(\\ch) Switch to 'chat' mode to have a conversation without making changes"},
+			{Text: prefix + "chat", Description: "(" + prefix + "ch) Switch to 'chat' mode to have a conversation without making changes"},
 		}...)
 	} else if lib.CurrentReplState.Mode == lib.ReplModeChat {
 		suggestions = append(suggestions, []prompt.Suggest{
-			{Text: "\\tell", Description: "(\\t) Switch to 'tell' mode for implementation"},
+			{Text: prefix + "tell", Description: "(" + prefix + "t) Switch to 'tell' mode for implementation"},
 		}...)
 	}
 
 	if !lib.CurrentReplState.IsMulti {
 		suggestions = append(suggestions, []prompt.Suggest{
-			{Text: "\\multi", Description: "(\\m) Turn multi-line mode on"},
-			{Text: "\\run", Description: "(\\r) Run a file through tell/chat based on current mode"},
-			{Text: "\\quit", Description: "(\\q) Exit the REPL"},
+			{Text: prefix + "multi", Description: "(" + prefix + "m) Turn multi-line mode on"},
+			{Text: prefix + "run", Description: "(" + prefix + "r) Run a file through tell/chat based on current mode"},
+			{Text: prefix + "quit", Description: "(" + prefix + "q) Exit the REPL"},
 		}...)
 	}
 
 	// Add help command suggestion
-	suggestions = append(suggestions, prompt.Suggest{Text: "\\help", Description: "(\\h) REPL info and list of commands"})
-	suggestions = append(suggestions, cliSuggestions...)
+	suggestions = append(suggestions, prompt.Suggest{Text: prefix + "help", Description: "(" + prefix + "h) REPL info and list of commands"})
+	suggestions = append(suggestions, getCliSuggestions()...)
 
 	for path := range projectPaths.ActivePaths {
 		if path == "." {
@@ -273,20 +286,20 @@ func getSuggestions() []prompt.Suggest {
 		if isDir {
 			loadArgs += " -r"
 		}
-		suggestions = append(suggestions, prompt.Suggest{Text: "\\load " + loadArgs})
+		suggestions = append(suggestions, prompt.Suggest{Text: prefix + "load " + loadArgs})
 
 		if isDir {
 			loadArgs = path
 			loadArgs += " --map"
-			suggestions = append(suggestions, prompt.Suggest{Text: "\\load " + loadArgs})
+			suggestions = append(suggestions, prompt.Suggest{Text: prefix + "load " + loadArgs})
 
 			loadArgs = path
 			loadArgs += " --tree"
-			suggestions = append(suggestions, prompt.Suggest{Text: "\\load " + loadArgs})
+			suggestions = append(suggestions, prompt.Suggest{Text: prefix + "load " + loadArgs})
 		}
 
 		if filepath.Ext(path) == ".md" || filepath.Ext(path) == ".txt" {
-			suggestions = append(suggestions, prompt.Suggest{Text: "\\run " + path})
+			suggestions = append(suggestions, prompt.Suggest{Text: prefix + "run " + path})
 		}
 	}
 
@@ -342,8 +355,9 @@ func executor(in string, p *prompt.Prompt) {
 		return
 	}
 
-	// Find the last \ or @ in the last line
-	lastBackslashIndex := strings.LastIndex(lastLine, "\\")
+	// Find the last command prefix or @ in the last line
+	prefix := getCommandPrefix()
+	lastPrefixIndex := strings.LastIndex(lastLine, prefix)
 	lastAtIndex := strings.LastIndex(lastLine, "@")
 
 	var preservedBuffer string
@@ -354,7 +368,7 @@ func executor(in string, p *prompt.Prompt) {
 	suggestions, _, _ := completer(prompt.Document{Text: in})
 
 	// Handle file references
-	if lastAtIndex != -1 && lastAtIndex > lastBackslashIndex {
+	if lastAtIndex != -1 && lastAtIndex > lastPrefixIndex {
 		paths := strings.Split(lastLine, "@")
 		numPaths := len(paths)
 
@@ -396,22 +410,22 @@ func executor(in string, p *prompt.Prompt) {
 	}
 
 	// Handle commands
-	if lastBackslashIndex != -1 {
-		cmdString := strings.TrimSpace(lastLine[lastBackslashIndex+1:])
+	if lastPrefixIndex != -1 {
+		cmdString := strings.TrimSpace(lastLine[lastPrefixIndex+len(prefix):])
 		if cmdString == "" {
 			return
 		}
 		res := execWithInput(execWithInputParams{
-			cmdString:          cmdString,
-			in:                 condensedInput,
-			lastBackslashIndex: lastBackslashIndex,
-			preservedBuffer:    preservedBuffer,
-			p:                  p,
-			lastLine:           lastLine,
-			condensedInput:     condensedInput,
-			trimmedInput:       trimmedInput,
-			lines:              lines,
-			suggestions:        suggestions,
+			cmdString:       cmdString,
+			in:              condensedInput,
+			lastPrefixIndex: lastPrefixIndex,
+			preservedBuffer: preservedBuffer,
+			p:               p,
+			lastLine:        lastLine,
+			condensedInput:  condensedInput,
+			trimmedInput:    trimmedInput,
+			lines:           lines,
+			suggestions:     suggestions,
 		})
 		if res.shouldReturn {
 			return
@@ -419,7 +433,7 @@ func executor(in string, p *prompt.Prompt) {
 		condensedInput = res.condensedInput
 		trimmedInput = res.trimmedInput
 	} else if len(lines) == 1 {
-		// Check for likely accidental command inputs (with no backslash) and confirm with user
+		// Check for likely accidental command inputs (without command prefix) and confirm with user
 		var allCommands []string
 		for replCmd := range lib.ReplCmdAliases {
 			allCommands = append(allCommands, replCmd)
@@ -441,16 +455,16 @@ func executor(in string, p *prompt.Prompt) {
 			matchedCmd := res.matchedCmd
 			if matchedCmd != "" {
 				res := execWithInput(execWithInputParams{
-					cmdString:          matchedCmd,
-					in:                 condensedInput,
-					lastBackslashIndex: lastBackslashIndex,
-					preservedBuffer:    preservedBuffer,
-					p:                  p,
-					lastLine:           lastLine,
-					condensedInput:     condensedInput,
-					trimmedInput:       trimmedInput,
-					lines:              lines,
-					suggestions:        suggestions,
+					cmdString:       matchedCmd,
+					in:              condensedInput,
+					lastPrefixIndex: lastPrefixIndex,
+					preservedBuffer: preservedBuffer,
+					p:               p,
+					lastLine:        lastLine,
+					condensedInput:  condensedInput,
+					trimmedInput:    trimmedInput,
+					lines:           lines,
+					suggestions:     suggestions,
 				})
 				if res.shouldReturn {
 					return
@@ -529,6 +543,7 @@ func completer(in prompt.Document) ([]prompt.Suggest, pstrings.RuneNumber, pstri
 		return []prompt.Suggest{}, 0, 0
 	}
 
+	prefix := getCommandPrefix()
 	endIndex := in.CurrentRuneIndex()
 
 	lines := strings.Split(in.Text, "\n")
@@ -547,11 +562,11 @@ func completer(in prompt.Document) ([]prompt.Suggest, pstrings.RuneNumber, pstri
 	// Handle plandex/pdx command prefix
 	if strings.HasPrefix(lastLine, "plandex ") || strings.HasPrefix(lastLine, "pdx ") {
 		parts := strings.Fields(lastLine)
-		var prefix string
+		var lastPart string
 		if len(parts) > 1 {
-			prefix = parts[len(parts)-1]
+			lastPart = parts[len(parts)-1]
 		}
-		startIndex := endIndex - pstrings.RuneNumber(len(prefix))
+		startIndex := endIndex - pstrings.RuneNumber(len(lastPart))
 
 		suggestions := []prompt.Suggest{}
 		for _, config := range term.CliCommands {
@@ -561,12 +576,12 @@ func completer(in prompt.Document) ([]prompt.Suggest, pstrings.RuneNumber, pstri
 			})
 		}
 
-		filtered := prompt.FilterFuzzy(suggestions, prefix, true)
+		filtered := prompt.FilterFuzzy(suggestions, lastPart, true)
 		return filtered, startIndex, endIndex
 	}
 
-	// Find the last valid \ or @ in the current line
-	lastBackslashIndex := -1
+	// Find the last valid command prefix or @ in the current line
+	lastPrefixIndex := -1
 	lastAtIndex := -1
 
 	// Helper function to check if character at index is valid (start of line or after space)
@@ -577,10 +592,10 @@ func completer(in prompt.Document) ([]prompt.Suggest, pstrings.RuneNumber, pstri
 		return unicode.IsSpace(rune(str[index-1])) // After whitespace
 	}
 
-	// Find last valid backslash
+	// Find last valid command prefix
 	for i := len(lastLine) - 1; i >= 0; i-- {
-		if lastLine[i] == '\\' && isValidPosition(lastLine, i) {
-			lastBackslashIndex = i
+		if strings.HasPrefix(lastLine[i:], prefix) && isValidPosition(lastLine, i) {
+			lastPrefixIndex = i
 			break
 		}
 	}
@@ -596,14 +611,14 @@ func completer(in prompt.Document) ([]prompt.Suggest, pstrings.RuneNumber, pstri
 	var w string
 	var startIndex pstrings.RuneNumber
 
-	if lastBackslashIndex == -1 && lastAtIndex == -1 {
+	if lastPrefixIndex == -1 && lastAtIndex == -1 {
 		return []prompt.Suggest{}, 0, 0
 	}
 
 	// Use the rightmost special character
-	if lastBackslashIndex > lastAtIndex {
-		// Get everything after the last backslash
-		w = lastLine[lastBackslashIndex:]
+	if lastPrefixIndex > lastAtIndex {
+		// Get everything after the last command prefix
+		w = lastLine[lastPrefixIndex:]
 		startIndex = endIndex - pstrings.RuneNumber(len(w))
 	} else if lastAtIndex != -1 {
 		// Get everything after the last @
@@ -616,12 +631,12 @@ func completer(in prompt.Document) ([]prompt.Suggest, pstrings.RuneNumber, pstri
 		return []prompt.Suggest{}, 0, 0
 	}
 
-	wTrimmed := strings.TrimSpace(strings.TrimPrefix(w, "\\"))
+	wTrimmed := strings.TrimSpace(strings.TrimPrefix(w, prefix))
 	parts := strings.Split(wTrimmed, " ")
 	wCmd := parts[0]
 
 	// For commands, verify it starts with an actual command
-	if strings.HasPrefix(w, "\\") {
+	if strings.HasPrefix(w, prefix) {
 		isValidCommand := false
 		for _, config := range term.CliCommands {
 			if !config.Repl {
@@ -653,7 +668,7 @@ func completer(in prompt.Document) ([]prompt.Suggest, pstrings.RuneNumber, pstri
 	runFilteredFuzzy := []prompt.Suggest{}
 	runFilteredPrefixMatches := []prompt.Suggest{}
 	for _, s := range fuzzySuggestions {
-		if strings.HasPrefix(s.Text, "\\run ") {
+		if strings.HasPrefix(s.Text, prefix+"run ") {
 			if wCmd == "run" {
 				runFilteredFuzzy = append(runFilteredFuzzy, s)
 			}
@@ -662,7 +677,7 @@ func completer(in prompt.Document) ([]prompt.Suggest, pstrings.RuneNumber, pstri
 		}
 	}
 	for _, s := range prefixMatches {
-		if strings.HasPrefix(s.Text, "\\run ") {
+		if strings.HasPrefix(s.Text, prefix+"run ") {
 			if wCmd == "run" {
 				runFilteredPrefixMatches = append(runFilteredPrefixMatches, s)
 			}
@@ -676,7 +691,7 @@ func completer(in prompt.Document) ([]prompt.Suggest, pstrings.RuneNumber, pstri
 	loadFilteredFuzzy := []prompt.Suggest{}
 	loadFilteredPrefixMatches := []prompt.Suggest{}
 	for _, s := range fuzzySuggestions {
-		if strings.HasPrefix(s.Text, "\\load ") {
+		if strings.HasPrefix(s.Text, prefix+"load ") {
 			if wCmd == "load" {
 				loadFilteredFuzzy = append(loadFilteredFuzzy, s)
 			}
@@ -685,7 +700,7 @@ func completer(in prompt.Document) ([]prompt.Suggest, pstrings.RuneNumber, pstri
 		}
 	}
 	for _, s := range prefixMatches {
-		if strings.HasPrefix(s.Text, "\\load ") {
+		if strings.HasPrefix(s.Text, prefix+"load ") {
 			if wCmd == "load" {
 				loadFilteredPrefixMatches = append(loadFilteredPrefixMatches, s)
 			}
@@ -696,14 +711,14 @@ func completer(in prompt.Document) ([]prompt.Suggest, pstrings.RuneNumber, pstri
 	fuzzySuggestions = loadFilteredFuzzy
 	prefixMatches = loadFilteredPrefixMatches
 
-	if strings.TrimSpace(w) != "\\" {
+	if strings.TrimSpace(w) != prefix {
 		sort.Slice(prefixMatches, func(i, j int) bool {
 			iTxt := prefixMatches[i].Text
 			jTxt := prefixMatches[j].Text
-			if iTxt == "\\chat" || iTxt == "\\tell" || iTxt == "\\multi" || iTxt == "\\quit" || iTxt == "\\send" || iTxt == "\\run" {
+			if iTxt == prefix+"chat" || iTxt == prefix+"tell" || iTxt == prefix+"multi" || iTxt == prefix+"quit" || iTxt == prefix+"send" || iTxt == prefix+"run" {
 				return true
 			}
-			if jTxt == "\\chat" || jTxt == "\\tell" || jTxt == "\\multi" || jTxt == "\\quit" || jTxt == "\\send" || jTxt == "\\run" {
+			if jTxt == prefix+"chat" || jTxt == prefix+"tell" || jTxt == prefix+"multi" || jTxt == prefix+"quit" || jTxt == prefix+"send" || jTxt == prefix+"run" {
 				return false
 			}
 			return prefixMatches[i].Text < prefixMatches[j].Text
@@ -730,11 +745,11 @@ func completer(in prompt.Document) ([]prompt.Suggest, pstrings.RuneNumber, pstri
 	var aliasMatch string
 
 	if lib.ReplCmdAliases[wTrimmed] != "" {
-		aliasMatch = "\\" + lib.ReplCmdAliases[wTrimmed]
+		aliasMatch = prefix + lib.ReplCmdAliases[wTrimmed]
 	} else {
 		for _, s := range term.CliCommands {
 			if s.Alias == wTrimmed {
-				aliasMatch = "\\" + s.Cmd
+				aliasMatch = prefix + s.Cmd
 				break
 			}
 		}
@@ -836,16 +851,18 @@ func replWelcome(params replWelcomeParams) {
 		contextMode = "manual"
 	}
 
+	prefix := getCommandPrefix()
+
 	filesStr := "%s for loading files into context"
 	if contextMode == "auto" {
 		filesStr += " manually (optional)"
 	}
 	filesStr += "\n"
 
-	color.New(color.FgHiWhite).Printf("%s for commands\n", color.New(term.ColorHiCyan, color.Bold).Sprint("\\"))
+	color.New(color.FgHiWhite).Printf("%s for commands\n", color.New(term.ColorHiCyan, color.Bold).Sprint(prefix))
 	color.New(color.FgHiWhite).Printf(filesStr, color.New(term.ColorHiCyan, color.Bold).Sprint("@"))
-	color.New(color.FgHiWhite).Printf("%s (\\h) for help\n", color.New(term.ColorHiCyan, color.Bold).Sprint("\\help"))
-	color.New(color.FgHiWhite).Printf("%s (\\q) to exit\n", color.New(term.ColorHiCyan, color.Bold).Sprint("\\quit"))
+	color.New(color.FgHiWhite).Printf("%s (%sh) for help\n", color.New(term.ColorHiCyan, color.Bold).Sprint(prefix+"help"), prefix)
+	color.New(color.FgHiWhite).Printf("%s (%sq) to exit\n", color.New(term.ColorHiCyan, color.Bold).Sprint(prefix+"quit"), prefix)
 
 	fmt.Println()
 
@@ -855,9 +872,9 @@ func replWelcome(params replWelcomeParams) {
 		printAutoModeTable(config)
 	}
 
-	color.New(color.FgHiWhite).Printf("%s to change auto mode\n", color.New(term.ColorHiCyan, color.Bold).Sprint("\\set-auto"))
-	color.New(color.FgHiWhite).Printf("%s to see config\n", color.New(term.ColorHiCyan, color.Bold).Sprint("\\config"))
-	color.New(color.FgHiWhite).Printf("%s to customize config\n", color.New(term.ColorHiCyan, color.Bold).Sprint("\\set-config"))
+	color.New(color.FgHiWhite).Printf("%s to change auto mode\n", color.New(term.ColorHiCyan, color.Bold).Sprint(prefix+"set-auto"))
+	color.New(color.FgHiWhite).Printf("%s to see config\n", color.New(term.ColorHiCyan, color.Bold).Sprint(prefix+"config"))
+	color.New(color.FgHiWhite).Printf("%s to customize config\n", color.New(term.ColorHiCyan, color.Bold).Sprint(prefix+"set-config"))
 	fmt.Println()
 
 	if printModelFn != nil {
@@ -865,8 +882,8 @@ func replWelcome(params replWelcomeParams) {
 	} else {
 		printModelPackTable(packName)
 	}
-	color.New(color.FgHiWhite).Printf("%s to see model details\n", color.New(term.ColorHiCyan, color.Bold).Sprint("\\models"))
-	color.New(color.FgHiWhite).Printf("%s to change models\n", color.New(term.ColorHiCyan, color.Bold).Sprint("\\set-model"))
+	color.New(color.FgHiWhite).Printf("%s to see model details\n", color.New(term.ColorHiCyan, color.Bold).Sprint(prefix+"models"))
+	color.New(color.FgHiWhite).Printf("%s to change models\n", color.New(term.ColorHiCyan, color.Bold).Sprint(prefix+"set-model"))
 
 	showReplMode()
 	showMultiLineMode()
@@ -892,26 +909,28 @@ func replHelp() {
 }
 
 func showReplMode() {
+	prefix := getCommandPrefix()
 	fmt.Println()
 	if lib.CurrentReplState.Mode == lib.ReplModeTell {
 		color.New(color.BgMagenta, color.FgHiWhite, color.Bold).Println(" ⚡️ Tell mode is enabled ")
-		color.New(color.FgHiWhite).Printf("%s (\\ch) switch to chat mode to chat without writing code or making changes\n", color.New(term.ColorHiCyan, color.Bold).Sprint("\\chat"))
+		color.New(color.FgHiWhite).Printf("%s (%sch) switch to chat mode to chat without writing code or making changes\n", color.New(term.ColorHiCyan, color.Bold).Sprint(prefix+"chat"), prefix)
 	} else if lib.CurrentReplState.Mode == lib.ReplModeChat {
 		color.New(color.BgMagenta, color.FgHiWhite, color.Bold).Println(" 💬 Chat mode is enabled ")
-		color.New(color.FgHiWhite).Printf("%s (\\t) switch to tell mode to start writing code and implementing tasks\n", color.New(term.ColorHiCyan, color.Bold).Sprint("\\tell"))
+		color.New(color.FgHiWhite).Printf("%s (%st) switch to tell mode to start writing code and implementing tasks\n", color.New(term.ColorHiCyan, color.Bold).Sprint(prefix+"tell"), prefix)
 	}
 	fmt.Println()
 }
 
 func showMultiLineMode() {
+	prefix := getCommandPrefix()
 	if lib.CurrentReplState.IsMulti {
 		color.New(color.BgMagenta, color.FgHiWhite, color.Bold).Println(" 🔢 Multi-line mode is enabled ")
-		fmt.Printf("%s to exit multi-line mode\n", color.New(term.ColorHiCyan, color.Bold).Sprint("\\multi"))
+		fmt.Printf("%s to exit multi-line mode\n", color.New(term.ColorHiCyan, color.Bold).Sprint(prefix+"multi"))
 		fmt.Printf("%s for line breaks\n", color.New(term.ColorHiCyan, color.Bold).Sprint("enter"))
-		fmt.Printf("%s to send prompt\n", color.New(term.ColorHiCyan, color.Bold).Sprint("\\send"))
+		fmt.Printf("%s to send prompt\n", color.New(term.ColorHiCyan, color.Bold).Sprint(prefix+"send"))
 	} else {
 		color.New(color.BgMagenta, color.FgHiWhite, color.Bold).Println(" 1️⃣  Multi-line mode is disabled ")
-		fmt.Printf("%s for multi-line editing mode\n", color.New(term.ColorHiCyan, color.Bold).Sprint("\\multi"))
+		fmt.Printf("%s for multi-line editing mode\n", color.New(term.ColorHiCyan, color.Bold).Sprint(prefix+"multi"))
 		fmt.Printf("%s to send prompt\n", color.New(term.ColorHiCyan, color.Bold).Sprint("enter"))
 	}
 }
@@ -932,14 +951,16 @@ func parseCommand(in string) (string, string) {
 		return lastLine, lastLine
 	}
 
-	// Find the last \ or @ in the last line
-	lastBackslashIndex := strings.LastIndex(lastLine, "\\")
+	prefix := getCommandPrefix()
+
+	// Find the last command prefix or @ in the last line
+	lastPrefixIndex := strings.LastIndex(lastLine, prefix)
 	lastAtIndex := strings.LastIndex(lastLine, "@")
 
 	suggestions, _, _ := completer(prompt.Document{Text: in})
 
 	// Handle file references
-	if lastAtIndex != -1 && lastAtIndex > lastBackslashIndex {
+	if lastAtIndex != -1 && lastAtIndex > lastPrefixIndex {
 		paths := strings.Split(lastLine, "@")
 		split2 := strings.SplitN(lastLine, "@", 2)
 		numPaths := len(paths)
@@ -971,8 +992,8 @@ func parseCommand(in string) (string, string) {
 	}
 
 	// Handle commands
-	if lastBackslashIndex != -1 {
-		cmdString := strings.TrimSpace(lastLine[lastBackslashIndex+1:])
+	if lastPrefixIndex != -1 {
+		cmdString := strings.TrimSpace(lastLine[lastPrefixIndex+len(prefix):])
 		if cmdString == "" {
 			return "", ""
 		}
@@ -985,25 +1006,25 @@ func parseCommand(in string) (string, string) {
 		// Handle built-in REPL commands
 		switch cmd {
 		case "quit", lib.ReplCmdAliases["quit"]:
-			return "\\quit", "\\" + cmdString
+			return prefix + "quit", prefix + cmdString
 
 		case "help", lib.ReplCmdAliases["help"]:
-			return "\\help", "\\" + cmdString
+			return prefix + "help", prefix + cmdString
 
 		case "multi", lib.ReplCmdAliases["multi"]:
-			return "\\multi", "\\" + cmdString
+			return prefix + "multi", prefix + cmdString
 
 		case "send", lib.ReplCmdAliases["send"]:
-			return "\\send", "\\" + cmdString
+			return prefix + "send", prefix + cmdString
 
 		case "tell", lib.ReplCmdAliases["tell"]:
-			return "\\tell", "\\" + cmdString
+			return prefix + "tell", prefix + cmdString
 
 		case "chat", lib.ReplCmdAliases["chat"]:
-			return "\\chat", "\\" + cmdString
+			return prefix + "chat", prefix + cmdString
 
 		case "run", lib.ReplCmdAliases["run"]:
-			return "\\run", "\\" + cmdString
+			return prefix + "run", prefix + cmdString
 
 		default:
 			// Check CLI commands
@@ -1031,7 +1052,7 @@ func parseCommand(in string) (string, string) {
 				if len(args) > 0 {
 					res += " " + strings.Join(args, " ")
 				}
-				return res, "\\" + cmdString
+				return res, prefix + cmdString
 			}
 		}
 	}
@@ -1102,13 +1123,14 @@ type suggestCmdsResult struct {
 }
 
 func suggestCmds(cmds []string, promptOpt string) suggestCmdsResult {
+	prefix := getCommandPrefix()
 	var matchedCmd string
 
 	fmt.Println()
 	opts := []string{}
 
 	for _, match := range cmds {
-		opts = append(opts, "\\"+match)
+		opts = append(opts, prefix+match)
 	}
 	opts = append(opts, cancelOpt, promptOpt)
 	sel, err := term.SelectFromList("🤔 Did you mean to type one of these commands?", opts)
@@ -1118,23 +1140,23 @@ func suggestCmds(cmds []string, promptOpt string) suggestCmdsResult {
 	if sel == cancelOpt {
 		return suggestCmdsResult{shouldReturn: true}
 	} else if sel != promptOpt {
-		matchedCmd = strings.Replace(sel, "\\", "", 1)
+		matchedCmd = strings.TrimPrefix(sel, prefix)
 	}
 
 	return suggestCmdsResult{matchedCmd: matchedCmd}
 }
 
 type execWithInputParams struct {
-	cmdString          string
-	in                 string
-	lastBackslashIndex int
-	preservedBuffer    string
-	p                  *prompt.Prompt
-	lastLine           string
-	condensedInput     string
-	trimmedInput       string
-	lines              []string
-	suggestions        []prompt.Suggest
+	cmdString       string
+	in              string
+	lastPrefixIndex int
+	preservedBuffer string
+	p               *prompt.Prompt
+	lastLine        string
+	condensedInput  string
+	trimmedInput    string
+	lines           []string
+	suggestions     []prompt.Suggest
 }
 
 type execWithInputResult struct {
@@ -1146,7 +1168,7 @@ type execWithInputResult struct {
 func execWithInput(params execWithInputParams) execWithInputResult {
 	cmdString := params.cmdString
 	in := params.in
-	lastBackslashIndex := params.lastBackslashIndex
+	lastPrefixIndex := params.lastPrefixIndex
 	preservedBuffer := params.preservedBuffer
 	lastLine := params.lastLine
 	p := params.p
@@ -1154,6 +1176,7 @@ func execWithInput(params execWithInputParams) execWithInputResult {
 	trimmedInput := params.trimmedInput
 	lines := params.lines
 	suggestions := params.suggestions
+	prefix := getCommandPrefix()
 
 	// Split into command and args
 	parts := strings.Fields(cmdString)
@@ -1184,8 +1207,8 @@ func execWithInput(params execWithInputParams) execWithInputResult {
 		os.Exit(0)
 
 	case cmd == "help" || cmd == lib.ReplCmdAliases["help"]:
-		if lastBackslashIndex > 0 {
-			preservedBuffer += lastLine[:lastBackslashIndex]
+		if lastPrefixIndex > 0 {
+			preservedBuffer += lastLine[:lastPrefixIndex]
 		}
 		replHelp()
 		fmt.Println()
@@ -1195,8 +1218,8 @@ func execWithInput(params execWithInputParams) execWithInputResult {
 		return execWithInputResult{shouldReturn: true}
 
 	case cmd == "multi" || cmd == lib.ReplCmdAliases["multi"]:
-		if lastBackslashIndex > 0 {
-			preservedBuffer += lastLine[:lastBackslashIndex]
+		if lastPrefixIndex > 0 {
+			preservedBuffer += lastLine[:lastPrefixIndex]
 		}
 		fmt.Println()
 		lib.CurrentReplState.IsMulti = !lib.CurrentReplState.IsMulti
@@ -1209,11 +1232,11 @@ func execWithInput(params execWithInputParams) execWithInputResult {
 		return execWithInputResult{shouldReturn: true}
 
 	case cmd == "send" || cmd == lib.ReplCmdAliases["send"]:
-		condensedSplit := strings.Split(condensedInput, "\\s")
+		condensedSplit := strings.Split(condensedInput, prefix+"s")
 		condensedInput = strings.TrimSpace(condensedSplit[0])
 		condensedInput = strings.TrimSpace(condensedInput)
 
-		trimmedSplit := strings.Split(trimmedInput, "\\s")
+		trimmedSplit := strings.Split(trimmedInput, prefix+"s")
 		trimmedInput = strings.TrimSpace(trimmedSplit[0])
 		trimmedInput = strings.TrimSpace(trimmedInput)
 
@@ -1225,8 +1248,8 @@ func execWithInput(params execWithInputParams) execWithInputResult {
 		}
 
 	case cmd == "tell" || cmd == lib.ReplCmdAliases["tell"]:
-		if lastBackslashIndex > 0 {
-			preservedBuffer += lastLine[:lastBackslashIndex]
+		if lastPrefixIndex > 0 {
+			preservedBuffer += lastLine[:lastPrefixIndex]
 		}
 		lib.CurrentReplState.Mode = lib.ReplModeTell
 		lib.WriteState()
@@ -1237,8 +1260,8 @@ func execWithInput(params execWithInputParams) execWithInputResult {
 		return execWithInputResult{shouldReturn: true}
 
 	case cmd == "chat" || cmd == lib.ReplCmdAliases["chat"]:
-		if lastBackslashIndex > 0 {
-			preservedBuffer += lastLine[:lastBackslashIndex]
+		if lastPrefixIndex > 0 {
+			preservedBuffer += lastLine[:lastPrefixIndex]
 		}
 		lib.CurrentReplState.Mode = lib.ReplModeChat
 		lib.WriteState()
@@ -1249,8 +1272,8 @@ func execWithInput(params execWithInputParams) execWithInputResult {
 		return execWithInputResult{shouldReturn: true}
 
 	case cmd == "run" || cmd == lib.ReplCmdAliases["run"]:
-		if lastBackslashIndex > 0 {
-			preservedBuffer += lastLine[:lastBackslashIndex]
+		if lastPrefixIndex > 0 {
+			preservedBuffer += lastLine[:lastPrefixIndex]
 		}
 		fmt.Println()
 		if err := handleRunCommand(args); err != nil {
@@ -1274,18 +1297,18 @@ func execWithInput(params execWithInputParams) execWithInputResult {
 		}
 
 		if matchedCmd == "" && len(suggestions) > 0 {
-			matchedCmd = strings.Replace(suggestions[0].Text, "\\", "", 1)
+			matchedCmd = strings.TrimPrefix(suggestions[0].Text, prefix)
 			return execWithInput(execWithInputParams{
-				cmdString:          matchedCmd,
-				in:                 condensedInput,
-				lastBackslashIndex: lastBackslashIndex,
-				preservedBuffer:    preservedBuffer,
-				p:                  p,
-				lastLine:           lastLine,
-				condensedInput:     condensedInput,
-				trimmedInput:       trimmedInput,
-				lines:              lines,
-				suggestions:        suggestions,
+				cmdString:       matchedCmd,
+				in:              condensedInput,
+				lastPrefixIndex: lastPrefixIndex,
+				preservedBuffer: preservedBuffer,
+				p:               p,
+				lastLine:        lastLine,
+				condensedInput:  condensedInput,
+				trimmedInput:    trimmedInput,
+				lines:           lines,
+				suggestions:     suggestions,
 			})
 		}
 
@@ -1299,18 +1322,18 @@ func execWithInput(params execWithInputParams) execWithInputResult {
 				}
 				matchedCmd = res.matchedCmd
 				return execWithInput(execWithInputParams{
-					cmdString:          matchedCmd,
-					in:                 condensedInput,
-					lastBackslashIndex: lastBackslashIndex,
-					preservedBuffer:    preservedBuffer,
-					p:                  p,
-					lastLine:           lastLine,
-					condensedInput:     condensedInput,
-					trimmedInput:       trimmedInput,
-					lines:              lines,
-					suggestions:        suggestions,
+					cmdString:       matchedCmd,
+					in:              condensedInput,
+					lastPrefixIndex: lastPrefixIndex,
+					preservedBuffer: preservedBuffer,
+					p:               p,
+					lastLine:        lastLine,
+					condensedInput:  condensedInput,
+					trimmedInput:    trimmedInput,
+					lines:           lines,
+					suggestions:     suggestions,
 				})
-			} else if len(lines) == 1 && strings.HasPrefix(trimmedInput, "\\") {
+			} else if len(lines) == 1 && strings.HasPrefix(trimmedInput, prefix) {
 				showCmdsOpt := "Show available commands"
 				opts := []string{cancelOpt, showCmdsOpt, promptOpt}
 				sel, err := term.SelectFromList("🤔 Couldn't find a matching command. What do you want to do?", opts)
@@ -1329,8 +1352,8 @@ func execWithInput(params execWithInputParams) execWithInputResult {
 
 		if matchedCmd != "" {
 			// fmt.Println("> plandex " + config.Cmd)
-			if lastBackslashIndex > 0 {
-				preservedBuffer += lastLine[:lastBackslashIndex]
+			if lastPrefixIndex > 0 {
+				preservedBuffer += lastLine[:lastPrefixIndex]
 			}
 			fmt.Println()
 			execArgs := []string{matchedCmd}
