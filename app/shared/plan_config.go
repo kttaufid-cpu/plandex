@@ -8,6 +8,7 @@ import (
 )
 
 const defaultAutoDebugTries = 5
+const defaultCommandPrefix = "\\"
 
 const (
 	EditorTypeVim  string = "vim"
@@ -86,6 +87,8 @@ type PlanConfig struct {
 	AutoRevertOnRewind bool `json:"autoRevertOnRewind"`
 
 	SkipChangesMenu bool `json:"skipChangesMenu"`
+
+	CommandPrefix string `json:"commandPrefix"`
 
 	// ReplMode    bool     `json:"replMode"`
 	// DefaultRepl ReplType `json:"defaultRepl"`
@@ -200,6 +203,13 @@ func (p *PlanConfig) SetAutoMode(mode AutoModeType) {
 		p.AutoRevertOnRewind = true
 		p.SkipChangesMenu = false
 	}
+}
+
+func (p *PlanConfig) GetCommandPrefix() string {
+	if p.CommandPrefix == "" {
+		return defaultCommandPrefix
+	}
+	return p.CommandPrefix
 }
 
 type ConfigSetting struct {
@@ -484,6 +494,16 @@ var ConfigSettingsByKey = map[string]ConfigSetting{
 		},
 		Getter: func(p *PlanConfig) string {
 			return fmt.Sprintf("%t", p.SkipChangesMenu)
+		},
+	},
+	"commandprefix": {
+		Name: "command-prefix",
+		Desc: "Character used to prefix REPL commands (default: \\)",
+		StringSetter: func(p *PlanConfig, value string) {
+			p.CommandPrefix = value
+		},
+		Getter: func(p *PlanConfig) string {
+			return p.GetCommandPrefix()
 		},
 	},
 }
