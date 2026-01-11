@@ -36,6 +36,17 @@ func init() {
 		HomePlandexDir = filepath.Join(home, ".plandex-home-v2")
 	}
 
+	// Check for XDG_CONFIG_HOME (XDG Base Directory Spec)
+	// If set, use it instead of home directory
+	xdgConfigHome := os.Getenv("XDG_CONFIG_HOME")
+	if xdgConfigHome != "" {
+		if os.Getenv("PLANDEX_ENV") == "development" {
+			HomePlandexDir = filepath.Join(xdgConfigHome, "plandex-dev")
+		} else {
+			HomePlandexDir = filepath.Join(xdgConfigHome, "plandex")
+		}
+	}
+
 	// Create the home plandex directory if it doesn't exist
 	err = os.MkdirAll(HomePlandexDir, os.ModePerm)
 	if err != nil {
