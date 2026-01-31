@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"plandex/types"
+	"plandex-cli/types"
+	"plandex-cli/version"
 
-	"github.com/plandex/plandex/shared"
+	shared "plandex-shared"
 )
 
 var apiClient types.ApiClient
@@ -20,10 +21,12 @@ func SetAuthHeader(req *http.Request) error {
 	if Current == nil {
 		return fmt.Errorf("error setting auth header: auth not loaded")
 	}
+	hash := Current.ToHash()
 
 	authHeader := shared.AuthHeader{
 		Token: Current.Token,
 		OrgId: Current.OrgId,
+		Hash:  hash,
 	}
 
 	bytes, err := json.Marshal(authHeader)
@@ -38,4 +41,8 @@ func SetAuthHeader(req *http.Request) error {
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	return nil
+}
+
+func SetVersionHeader(req *http.Request) {
+	req.Header.Set("X-Client-Version", version.Version)
 }

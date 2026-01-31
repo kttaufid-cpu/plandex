@@ -2,10 +2,10 @@ package cmd
 
 import (
 	"fmt"
-	"plandex/api"
-	"plandex/auth"
-	"plandex/lib"
-	"plandex/term"
+	"plandex-cli/api"
+	"plandex-cli/auth"
+	"plandex-cli/lib"
+	"plandex-cli/term"
 	"strconv"
 	"strings"
 
@@ -15,7 +15,7 @@ import (
 
 var deleteBranchCmd = &cobra.Command{
 	Use:     "delete-branch",
-	Aliases: []string{"db"},
+	Aliases: []string{"dlb"},
 	Short:   "Delete a plan branch by name or index",
 	Run:     deleteBranch,
 	Args:    cobra.MaximumNArgs(1),

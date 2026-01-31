@@ -1,20 +1,23 @@
 package cmd
 
 import (
-	"plandex/auth"
-	"plandex/lib"
-	"plandex/term"
+	"plandex-cli/auth"
+	"plandex-cli/lib"
+	"plandex-cli/plan_exec"
+	"plandex-cli/term"
+	"plandex-cli/types"
 
 	"github.com/spf13/cobra"
 )
 
-var autoConfirm, autoCommit, noCommit bool
+var autoCommit, skipCommit, autoExec bool
 
 func init() {
-	applyCmd.Flags().BoolVarP(&autoConfirm, "yes", "y", false, "Automatically confirm unless plan is outdated")
-	applyCmd.Flags().BoolVarP(&autoCommit, "commit", "c", false, "Commit changes to git")
-	applyCmd.Flags().BoolVarP(&noCommit, "no-commit", "n", false, "Do not commit changes to git")
+	initApplyFlags(applyCmd, false)
+	initExecScriptFlags(applyCmd)
 	RootCmd.AddCommand(applyCmd)
+
+	applyCmd.Flags().BoolVar(&fullAuto, "full", false, "Apply the plan and debug in full auto mode")
 }
 
 var applyCmd = &cobra.Command{
@@ -28,9 +31,44 @@ func apply(cmd *cobra.Command, args []string) {
 	auth.MustResolveAuthWithOrg()
 	lib.MustResolveProject()
 
+	if fullAuto {
+		term.StartSpinner("")
+		config := lib.MustGetCurrentPlanConfig()
+		_, updatedConfig, printFn := resolveAutoModeSilent(config)
+		lib.SetCachedPlanConfig(updatedConfig)
+		term.StopSpinner()
+		printFn()
+	}
+
+	mustSetPlanExecFlags(cmd, true)
+
 	if lib.CurrentPlanId == "" {
 		term.OutputNoCurrentPlanErrorAndExit()
 	}
 
-	lib.MustApplyPlan(lib.CurrentPlanId, lib.CurrentBranch, autoConfirm, autoCommit, noCommit)
+	applyFlags := types.ApplyFlags{
+		AutoConfirm: true,
+		AutoCommit:  autoCommit,
+		NoCommit:    skipCommit,
+		AutoExec:    autoExec,
+		NoExec:      noExec,
+		AutoDebug:   autoDebug,
+	}
+
+	tellFlags := types.TellFlags{
+		TellBg:      tellBg,
+		TellStop:    tellStop,
+		TellNoBuild: tellNoBuild,
+		AutoContext: tellAutoContext,
+		ExecEnabled: !noExec,
+		AutoApply:   tellAutoApply,
+	}
+
+	lib.MustApplyPlan(lib.ApplyPlanParams{
+		PlanId:     lib.CurrentPlanId,
+		Branch:     lib.CurrentBranch,
+		ApplyFlags: applyFlags,
+		TellFlags:  tellFlags,
+		OnExecFail: plan_exec.GetOnApplyExecFail(applyFlags, tellFlags),
+	})
 }

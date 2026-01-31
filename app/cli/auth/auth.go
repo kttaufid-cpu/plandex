@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"plandex/fs"
-	"plandex/term"
+	"plandex-cli/fs"
+	"plandex-cli/term"
 
-	"github.com/plandex/plandex/shared"
+	shared "plandex-shared"
 )
 
 var openUnauthenticatedCloudURL func(msg, path string)
@@ -64,7 +64,7 @@ func MustResolveAuth(requireOrg bool) {
 			term.OutputErrorAndExit("Error listing orgs: %v", apiErr.Msg)
 		}
 
-		org, err := resolveOrgAuth(orgs)
+		org, err := resolveOrgAuth(orgs, Current.IsLocalMode)
 
 		if err != nil {
 			term.OutputErrorAndExit("Error resolving org: %v", err)
@@ -91,15 +91,14 @@ func RefreshInvalidToken() error {
 	if Current == nil {
 		return fmt.Errorf("error refreshing token: auth not loaded")
 	}
-
-	hasAccount, pin, err := verifyEmail(Current.Email, Current.Host)
+	res, err := verifyEmail(Current.Email, Current.Host)
 
 	if err != nil {
 		return fmt.Errorf("error verifying email: %v", err)
 	}
 
-	if hasAccount {
-		return signIn(Current.Email, pin, Current.Host)
+	if res.hasAccount {
+		return signIn(Current.Email, res.pin, Current.Host)
 	} else {
 		host := Current.Host
 		if host == "" {
@@ -107,6 +106,30 @@ func RefreshInvalidToken() error {
 		}
 
 		term.OutputErrorAndExit("Account %s not found on %s", Current.Email, host)
+	}
+
+	return nil
+}
+
+func RefreshAuth() error {
+	if Current == nil {
+		return fmt.Errorf("error refreshing auth: auth not loaded")
+	}
+
+	org, apiErr := apiClient.GetOrgSession()
+
+	if apiErr != nil {
+		return fmt.Errorf("error getting org session: %v", apiErr.Msg)
+	}
+
+	Current.OrgName = org.Name
+	Current.OrgIsTrial = org.IsTrial
+	Current.IntegratedModelsMode = org.IntegratedModelsMode
+
+	err := writeCurrentAuth()
+
+	if err != nil {
+		return fmt.Errorf("error writing auth: %v", err)
 	}
 
 	return nil

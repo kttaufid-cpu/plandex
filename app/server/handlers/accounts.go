@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -11,7 +12,9 @@ import (
 	"plandex-server/types"
 	"strings"
 
-	"github.com/plandex/plandex/shared"
+	shared "plandex-shared"
+
+	"github.com/jmoiron/sqlx"
 )
 
 func CreateAccountHandler(w http.ResponseWriter, r *http.Request) {
@@ -22,6 +25,8 @@ func CreateAccountHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Creating accounts is not supported in cloud mode", http.StatusNotImplemented)
 		return
 	}
+
+	isLocalMode := (os.Getenv("GOENV") == "development" && os.Getenv("LOCAL_MODE") == "1")
 
 	// read the request body
 	body, err := io.ReadAll(r.Body)
@@ -40,64 +45,55 @@ func CreateAccountHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Email = strings.ToLower(req.Email)
 
-	emailVerificationId, err := db.ValidateEmailVerification(req.Email, req.Pin)
+	var emailVerificationId string
 
-	if err != nil {
-		log.Printf("Error validating email verification: %v\n", err)
-		http.Error(w, "Error validating email verification: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+	// skipping email verification in dev/local mode
+	if !isLocalMode {
+		emailVerificationId, err = db.ValidateEmailVerification(req.Email, req.Pin)
 
-	// start a transaction
-	tx, err := db.Conn.Beginx()
-	if err != nil {
-		log.Printf("Error starting transaction: %v\n", err)
-		http.Error(w, "Error starting transaction: "+err.Error(), http.StatusInternalServerError)
-		return
+		if err != nil {
+			log.Printf("Error validating email verification: %v\n", err)
+			http.Error(w, "Error validating email verification: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	var apiErr *shared.ApiError
+	var user *db.User
+	var userId string
+	var token string
+	var orgId string
 
-	// Ensure that rollback is attempted in case of failure
-	defer func() {
-		if err != nil || apiErr != nil {
-			if rbErr := tx.Rollback(); rbErr != nil {
-				log.Printf("transaction rollback error: %v\n", rbErr)
-			} else {
-				log.Println("transaction rolled back")
-			}
+	err = db.WithTx(r.Context(), "create account", func(tx *sqlx.Tx) error {
+		res, err := db.CreateAccount(req.UserName, req.Email, emailVerificationId, tx)
+
+		if err != nil {
+			return fmt.Errorf("error creating account: %v", err)
 		}
-	}()
 
-	res, err := db.CreateAccount(req.UserName, req.Email, emailVerificationId, tx)
+		user = res.User
+		userId = user.Id
+		token = res.Token
+		orgId = res.OrgId
 
-	if err != nil {
-		log.Printf("Error creating account: %v\n", err)
-		http.Error(w, "Error creating account: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+		_, apiErr = hooks.ExecHook(hooks.CreateAccount, hooks.HookParams{
+			Auth: &types.ServerAuth{
+				User:  user,
+				OrgId: orgId,
+			},
+		})
 
-	user := res.User
-	userId := user.Id
-	token := res.Token
-	orgId := res.OrgId
-
-	_, apiErr = hooks.ExecHook(hooks.CreateAccount, hooks.HookParams{
-		Auth: &types.ServerAuth{
-			User:  user,
-			OrgId: orgId,
-		},
+		return nil
 	})
+
 	if apiErr != nil {
 		writeApiError(w, *apiErr)
 		return
 	}
 
-	// commit transaction
-	err = tx.Commit()
 	if err != nil {
-		log.Printf("Error committing transaction: %v\n", err)
-		http.Error(w, "Error committing transaction: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("Error creating account: %v\n", err)
+		http.Error(w, "Error creating account: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -119,11 +115,12 @@ func CreateAccountHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := shared.SessionResponse{
-		UserId:   userId,
-		Token:    token,
-		Email:    req.Email,
-		UserName: req.UserName,
-		Orgs:     apiOrgs,
+		UserId:      userId,
+		Token:       token,
+		Email:       req.Email,
+		UserName:    req.UserName,
+		Orgs:        apiOrgs,
+		IsLocalMode: os.Getenv("GOENV") == "development" && os.Getenv("LOCAL_MODE") == "1",
 	}
 
 	bytes, err := json.Marshal(resp)

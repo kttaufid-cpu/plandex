@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"plandex/term"
+	"plandex-cli/term"
 	"sync"
+
+	shared "plandex-shared"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/fatih/color"
-	"github.com/plandex/plandex/shared"
 )
 
 var ui *tea.Program
@@ -20,7 +21,7 @@ var prestartReply string
 var prestartErr *shared.ApiError
 var prestartAbort bool
 
-func StartStreamUI(prompt string, buildOnly bool) error {
+func StartStreamUI(prompt string, buildOnly, canSendToBg bool) error {
 	if prestartErr != nil {
 		log.Println("stream UI - prestart error: ", prestartErr)
 		term.HandleApiError(prestartErr)
@@ -31,15 +32,21 @@ func StartStreamUI(prompt string, buildOnly bool) error {
 		os.Exit(0)
 	}
 
-	initial := initialModel(prestartReply, prompt, buildOnly)
+	log.Println("Starting stream UI")
+
+	initial := initialModel(prestartReply, prompt, buildOnly, canSendToBg)
 
 	mu.Lock()
 	ui = tea.NewProgram(initial, tea.WithAltScreen())
 	mu.Unlock()
 
+	log.Println("Running bubbletea program")
 	wg.Add(1)
 	m, err := ui.Run()
+	log.Println("Bubbletea program finished")
 	wg.Done()
+
+	log.Println("Stream UI finished")
 
 	if err != nil {
 		return fmt.Errorf("error running stream UI: %v", err)
@@ -92,6 +99,14 @@ func StartStreamUI(prompt string, buildOnly bool) error {
 		os.Exit(0)
 	}
 
+	if os.Getenv("PLANDEX_REPL") != "" && os.Getenv("PLANDEX_REPL_OUTPUT_FILE") != "" {
+		// write output to file
+		err := os.WriteFile(os.Getenv("PLANDEX_REPL_OUTPUT_FILE"), []byte(mod.reply), 0644)
+		if err != nil {
+			log.Println("stream UI - error writing output to repl temp file: ", err)
+		}
+	}
+
 	return nil
 }
 
@@ -101,11 +116,12 @@ func Quit() {
 		return
 	}
 	mu.Lock()
-	defer mu.Unlock()
-	ui.Quit()
+	if ui != nil {
+		ui.Quit()
+	}
+	mu.Unlock()
 
 	wg.Wait() // Wait for the UI to fully terminate
-
 }
 
 func Send(msg shared.StreamMessage) {
@@ -123,6 +139,19 @@ func Send(msg shared.StreamMessage) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	// log.Printf("sending stream message to UI: %s\n", msg.Type)
 	ui.Send(msg)
+}
+
+func ToggleVisibility(hide bool) {
+	if ui == nil {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+
+	if hide {
+		ui.Send(tea.ExitAltScreen())
+	} else {
+		ui.Send(tea.EnterAltScreen())
+	}
 }

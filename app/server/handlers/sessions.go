@@ -7,11 +7,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"plandex-server/db"
 	"plandex-server/email"
 	"strings"
 
-	"github.com/plandex/plandex/shared"
+	shared "plandex-shared"
 )
 
 func CreateEmailVerificationHandler(w http.ResponseWriter, r *http.Request) {
@@ -79,37 +80,46 @@ func CreateEmailVerificationHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// create pin - 6 alphanumeric characters
-	pinBytes, err := shared.GetRandomAlphanumeric(6)
-	if err != nil {
-		log.Printf("Error generating random pin: %v\n", err)
-		http.Error(w, "Error generating random pin: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+	var res shared.CreateEmailVerificationResponse
 
-	// get sha256 hash of pin
-	hashBytes := sha256.Sum256(pinBytes)
-	pinHash := hex.EncodeToString(hashBytes[:])
+	if !(os.Getenv("GOENV") == "development" && os.Getenv("LOCAL_MODE") == "1") {
+		// create pin - 6 alphanumeric characters
+		pinBytes, err := shared.GetRandomAlphanumeric(6)
+		if err != nil {
+			log.Printf("Error generating random pin: %v\n", err)
+			http.Error(w, "Error generating random pin: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 
-	// create verification
-	err = db.CreateEmailVerification(req.Email, req.UserId, pinHash)
+		// get sha256 hash of pin
+		hashBytes := sha256.Sum256(pinBytes)
+		pinHash := hex.EncodeToString(hashBytes[:])
 
-	if err != nil {
-		log.Printf("Error creating email verification: %v\n", err)
-		http.Error(w, "Error creating email verification: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+		// create verification
+		err = db.CreateEmailVerification(req.Email, req.UserId, pinHash)
 
-	err = email.SendVerificationEmail(req.Email, string(pinBytes))
+		if err != nil {
+			log.Printf("Error creating email verification: %v\n", err)
+			http.Error(w, "Error creating email verification: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 
-	if err != nil {
-		log.Printf("Error sending verification email: %v\n", err)
-		http.Error(w, "Error sending verification email: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+		err = email.SendVerificationEmail(req.Email, string(pinBytes))
 
-	res := shared.CreateEmailVerificationResponse{
-		HasAccount: hasAccount,
+		if err != nil {
+			log.Printf("Error sending verification email: %v\n", err)
+			http.Error(w, "Error sending verification email: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		res = shared.CreateEmailVerificationResponse{
+			HasAccount: hasAccount,
+		}
+	} else {
+		res = shared.CreateEmailVerificationResponse{
+			HasAccount:  hasAccount,
+			IsLocalMode: true,
+		}
 	}
 
 	bytes, err := json.Marshal(res)
@@ -272,4 +282,65 @@ func SignOutHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Println("Successfully signed out")
+}
+
+func GetOrgUserConfigHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("Received request for GetOrgUserConfigHandler")
+
+	auth := Authenticate(w, r, true)
+	if auth == nil {
+		return
+	}
+
+	orgUserConfig, err := db.GetOrgUserConfig(auth.User.Id, auth.OrgId)
+
+	if err != nil {
+		log.Printf("Error getting org user config: %v\n", err)
+		http.Error(w, "Error getting org user config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	bytes, err := json.Marshal(orgUserConfig)
+
+	if err != nil {
+		log.Printf("Error marshalling response: %v\n", err)
+		http.Error(w, "Error marshalling response: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(bytes)
+}
+
+func UpdateOrgUserConfigHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("Received request for UpdateOrgUserConfigHandler")
+
+	auth := Authenticate(w, r, true)
+	if auth == nil {
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("Error reading request body: %v\n", err)
+		http.Error(w, "Error reading request body: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var req shared.OrgUserConfig
+	err = json.Unmarshal(body, &req)
+	if err != nil {
+		log.Printf("Error unmarshalling request: %v\n", err)
+		http.Error(w, "Error unmarshalling request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	err = db.UpdateOrgUserConfig(auth.User.Id, auth.OrgId, &req)
+
+	if err != nil {
+		log.Printf("Error updating org user config: %v\n", err)
+		http.Error(w, "Error updating org user config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	log.Println("Successfully updated org user config")
 }

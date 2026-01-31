@@ -1,17 +1,22 @@
 package db
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	shared "plandex-shared"
+
 	"github.com/google/uuid"
-	"github.com/plandex/plandex/shared"
 )
 
 func StorePlanResult(result *PlanFileResult) error {
@@ -36,7 +41,7 @@ func StorePlanResult(result *PlanFileResult) error {
 		return fmt.Errorf("error creating results dir: %v", err)
 	}
 
-	log.Printf("Storing plan result: %s", result.Id)
+	log.Printf("Storing plan result: %s - %s", result.Path, result.Id)
 
 	err = os.WriteFile(filepath.Join(resultsDir, result.Id+".json"), bytes, 0644)
 
@@ -56,6 +61,83 @@ type CurrentPlanStateParams struct {
 	Contexts                 []*Context
 }
 
+func GetFullCurrentPlanStateParams(orgId, planId string) (CurrentPlanStateParams, error) {
+	errCh := make(chan error, 3)
+
+	var results []*PlanFileResult
+	var convoMessageDescriptions []*ConvoMessageDescription
+	var contexts []*Context
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in GetFullCurrentPlanStateParams: %v\n%s", r, debug.Stack())
+				errCh <- fmt.Errorf("panic in GetFullCurrentPlanStateParams: %v\n%s", r, debug.Stack())
+				runtime.Goexit() // don't allow outer function to continue and double-send to channel
+			}
+		}()
+
+		res, err := GetPlanFileResults(orgId, planId)
+		if err != nil {
+			errCh <- fmt.Errorf("error getting plan file results: %v", err)
+			return
+		}
+		results = res
+		errCh <- nil
+	}()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in GetFullCurrentPlanStateParams: %v\n%s", r, debug.Stack())
+				errCh <- fmt.Errorf("panic in GetFullCurrentPlanStateParams: %v\n%s", r, debug.Stack())
+				runtime.Goexit() // don't allow outer function to continue and double-send to channel
+			}
+		}()
+		res, err := GetConvoMessageDescriptions(orgId, planId)
+		if err != nil {
+			errCh <- fmt.Errorf("error getting latest plan build description: %v", err)
+			return
+		}
+		convoMessageDescriptions = res
+		errCh <- nil
+	}()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in GetFullCurrentPlanStateParams: %v\n%s", r, debug.Stack())
+				errCh <- fmt.Errorf("panic in GetFullCurrentPlanStateParams: %v\n%s", r, debug.Stack())
+				runtime.Goexit() // don't allow outer function to continue and double-send to channel
+			}
+		}()
+		res, err := GetPlanContexts(orgId, planId, true, false)
+		if err != nil {
+			errCh <- fmt.Errorf("error getting contexts: %v", err)
+			return
+		}
+
+		contexts = res
+
+		errCh <- nil
+	}()
+
+	for i := 0; i < 3; i++ {
+		err := <-errCh
+		if err != nil {
+			return CurrentPlanStateParams{}, err
+		}
+	}
+
+	return CurrentPlanStateParams{
+		OrgId:                    orgId,
+		PlanId:                   planId,
+		PlanFileResults:          results,
+		ConvoMessageDescriptions: convoMessageDescriptions,
+		Contexts:                 contexts,
+	}, nil
+}
+
 func GetCurrentPlanState(params CurrentPlanStateParams) (*shared.CurrentPlanState, error) {
 	orgId := params.OrgId
 	planId := params.PlanId
@@ -63,10 +145,17 @@ func GetCurrentPlanState(params CurrentPlanStateParams) (*shared.CurrentPlanStat
 	var dbPlanFileResults []*PlanFileResult
 	var convoMessageDescriptions []*shared.ConvoMessageDescription
 	contextsByPath := map[string]*Context{}
-
-	errCh := make(chan error)
+	planApplies := []*shared.PlanApply{}
+	errCh := make(chan error, 4)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in GetCurrentPlanState: %v\n%s", r, debug.Stack())
+				errCh <- fmt.Errorf("panic in GetCurrentPlanState: %v\n%s", r, debug.Stack())
+				runtime.Goexit() // don't allow outer function to continue and double-send to channel
+			}
+		}()
 		if params.PlanFileResults == nil {
 			res, err := GetPlanFileResults(orgId, planId)
 			dbPlanFileResults = res
@@ -83,6 +172,13 @@ func GetCurrentPlanState(params CurrentPlanStateParams) (*shared.CurrentPlanStat
 	}()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in GetCurrentPlanState: %v\n%s", r, debug.Stack())
+				errCh <- fmt.Errorf("panic in GetCurrentPlanState: %v\n%s", r, debug.Stack())
+				runtime.Goexit() // don't allow outer function to continue and double-send to channel
+			}
+		}()
 		if params.ConvoMessageDescriptions == nil {
 			res, err := GetConvoMessageDescriptions(orgId, planId)
 			if err != nil {
@@ -103,9 +199,16 @@ func GetCurrentPlanState(params CurrentPlanStateParams) (*shared.CurrentPlanStat
 	}()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in GetCurrentPlanState: %v\n%s", r, debug.Stack())
+				errCh <- fmt.Errorf("panic in GetCurrentPlanState: %v\n%s", r, debug.Stack())
+				runtime.Goexit() // don't allow outer function to continue and double-send to channel
+			}
+		}()
 		var contexts []*Context
 		if params.Contexts == nil {
-			res, err := GetPlanContexts(orgId, planId, true)
+			res, err := GetPlanContexts(orgId, planId, true, false)
 			if err != nil {
 				errCh <- fmt.Errorf("error getting contexts: %v", err)
 				return
@@ -126,7 +229,28 @@ func GetCurrentPlanState(params CurrentPlanStateParams) (*shared.CurrentPlanStat
 		errCh <- nil
 	}()
 
-	for i := 0; i < 3; i++ {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in GetCurrentPlanState: %v\n%s", r, debug.Stack())
+				errCh <- fmt.Errorf("panic in GetCurrentPlanState: %v\n%s", r, debug.Stack())
+				runtime.Goexit() // don't allow outer function to continue and double-send to channel
+			}
+		}()
+		res, err := GetPlanApplies(orgId, planId)
+		if err != nil {
+			errCh <- fmt.Errorf("error getting plan applies: %v", err)
+			return
+		}
+
+		for _, apply := range res {
+			planApplies = append(planApplies, apply.ToApi())
+		}
+
+		errCh <- nil
+	}()
+
+	for i := 0; i < 4; i++ {
 		err := <-errCh
 		if err != nil {
 			return nil, err
@@ -168,6 +292,7 @@ func GetCurrentPlanState(params CurrentPlanStateParams) (*shared.CurrentPlanStat
 		PlanResult:               planResult,
 		ConvoMessageDescriptions: convoMessageDescriptions,
 		ContextsByPath:           pendingContextsByPath,
+		PlanApplies:              planApplies,
 	}
 
 	currentPlanFiles, err := planState.GetFiles()
@@ -200,6 +325,13 @@ func GetConvoMessageDescriptions(orgId, planId string) ([]*ConvoMessageDescripti
 
 	for _, file := range files {
 		go func(file os.DirEntry) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in GetConvoMessageDescriptions: %v\n%s", r, debug.Stack())
+					errCh <- fmt.Errorf("panic in GetConvoMessageDescriptions: %v\n%s", r, debug.Stack())
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
 			path := filepath.Join(descriptionsDir, file.Name())
 
 			bytes, err := os.ReadFile(path)
@@ -230,7 +362,7 @@ func GetConvoMessageDescriptions(orgId, planId string) ([]*ConvoMessageDescripti
 		case err := <-errCh:
 			return nil, fmt.Errorf("error reading description files: %v", err)
 		case description := <-descCh:
-			if description.MadePlan && description.AppliedAt == nil {
+			if description.WroteFiles && description.AppliedAt == nil {
 				descriptions = append(descriptions, description)
 			}
 		}
@@ -265,6 +397,13 @@ func GetPlanFileResults(orgId, planId string) ([]*PlanFileResult, error) {
 		// log.Printf("Result file: %s", file.Name())
 
 		go func(file os.DirEntry) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in GetPlanFileResults: %v\n%s", r, debug.Stack())
+					errCh <- fmt.Errorf("panic in GetPlanFileResults: %v\n%s", r, debug.Stack())
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
 
 			bytes, err := os.ReadFile(filepath.Join(resultsDir, file.Name()))
 
@@ -357,74 +496,55 @@ func GetPlanResult(planFileResults []*shared.PlanFileResult) *shared.PlanResult 
 	}
 }
 
-func ApplyPlan(orgId, userId, branchName string, plan *Plan) (*shared.CurrentPlanState, error) {
+type ApplyPlanParams struct {
+	OrgId                  string
+	UserId                 string
+	BranchName             string
+	Plan                   *Plan
+	CurrentPlanState       *shared.CurrentPlanState
+	CurrentPlanStateParams *CurrentPlanStateParams
+	CommitMsg              string
+}
+
+func ApplyPlan(repo *GitRepo, ctx context.Context, params ApplyPlanParams) error {
+	orgId := params.OrgId
+	userId := params.UserId
+	branchName := params.BranchName
+	plan := params.Plan
+	currentPlanState := params.CurrentPlanState
+	currentPlanParams := params.CurrentPlanStateParams
 	planId := plan.Id
-
 	resultsDir := getPlanResultsDir(orgId, planId)
-
-	errCh := make(chan error)
-
-	var results []*PlanFileResult
-	var convoMessageDescriptions []*ConvoMessageDescription
-	contextsById := make(map[string]*Context)
-	contextsByPath := make(map[string]*Context)
-
-	go func() {
-		res, err := GetPlanFileResults(orgId, planId)
-		if err != nil {
-			errCh <- fmt.Errorf("error getting plan file results: %v", err)
-			return
-		}
-		results = res
-		errCh <- nil
-	}()
-
-	go func() {
-		res, err := GetConvoMessageDescriptions(orgId, planId)
-		if err != nil {
-			errCh <- fmt.Errorf("error getting latest plan build description: %v", err)
-			return
-		}
-		convoMessageDescriptions = res
-		errCh <- nil
-	}()
-
-	go func() {
-		res, err := GetPlanContexts(orgId, planId, false)
-		if err != nil {
-			errCh <- fmt.Errorf("error getting contexts: %v", err)
-			return
-		}
-
-		for _, context := range res {
-			contextsById[context.Id] = context
-			if context.FilePath != "" {
-				contextsByPath[context.FilePath] = context
-			}
-		}
-
-		errCh <- nil
-	}()
-
-	for i := 0; i < 3; i++ {
-		err := <-errCh
-		if err != nil {
-			return nil, err
-		}
-	}
 
 	var pendingDbResults []*PlanFileResult
 
-	for _, result := range results {
+	planFileResults := currentPlanParams.PlanFileResults
+	convoMessageDescriptions := currentPlanParams.ConvoMessageDescriptions
+	contexts := currentPlanParams.Contexts
+
+	contextsByPath := make(map[string]*Context)
+	for _, context := range contexts {
+		if context.FilePath != "" {
+			contextsByPath[context.FilePath] = context
+		}
+	}
+
+	for _, result := range planFileResults {
 		apiResult := result.ToApi()
 		if apiResult.IsPending() {
 			pendingDbResults = append(pendingDbResults, result)
 		}
 	}
 
+	log.Printf("Pending db results: %d", len(pendingDbResults))
+
 	pendingNewFilesSet := make(map[string]bool)
 	pendingUpdatedFilesSet := make(map[string]bool)
 	for _, result := range pendingDbResults {
+		if result.Path == "_apply.sh" {
+			continue
+		}
+
 		if len(result.Replacements) == 0 && result.Content != "" {
 			pendingNewFilesSet[result.Path] = true
 		} else if !pendingNewFilesSet[result.Path] {
@@ -435,27 +555,28 @@ func ApplyPlan(orgId, userId, branchName string, plan *Plan) (*shared.CurrentPla
 	var loadContextRes *shared.LoadContextResponse
 	var updateContextRes *shared.UpdateContextResponse
 
-	var currentPlanState *shared.CurrentPlanState
-	if len(pendingNewFilesSet) > 0 || len(pendingUpdatedFilesSet) > 0 {
-		res, err := GetCurrentPlanState(CurrentPlanStateParams{
-			OrgId:                    orgId,
-			PlanId:                   plan.Id,
-			PlanFileResults:          results,
-			ConvoMessageDescriptions: convoMessageDescriptions,
-		})
+	numRoutines := len(pendingDbResults) +
+		len(convoMessageDescriptions)
 
-		if err != nil {
-			return nil, fmt.Errorf("error getting current plan state: %v", err)
-		}
-
-		currentPlanState = res
+	if len(pendingNewFilesSet) > 0 {
+		numRoutines++
+	}
+	if len(pendingUpdatedFilesSet) > 0 {
+		numRoutines++
 	}
 
-	errCh = make(chan error)
+	errCh := make(chan error, numRoutines)
 	now := time.Now()
 
 	for _, result := range pendingDbResults {
 		go func(result *PlanFileResult) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in ApplyPlan: %v\n%s", r, debug.Stack())
+					errCh <- fmt.Errorf("panic in ApplyPlan: %v\n%s", r, debug.Stack())
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
 			result.AppliedAt = &now
 
 			bytes, err := json.MarshalIndent(result, "", "  ")
@@ -479,6 +600,13 @@ func ApplyPlan(orgId, userId, branchName string, plan *Plan) (*shared.CurrentPla
 
 	for _, description := range convoMessageDescriptions {
 		go func(description *ConvoMessageDescription) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in ApplyPlan: %v\n%s", r, debug.Stack())
+					errCh <- fmt.Errorf("panic in ApplyPlan: %v\n%s", r, debug.Stack())
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
 			description.AppliedAt = &now
 
 			err := StoreDescription(description)
@@ -494,6 +622,13 @@ func ApplyPlan(orgId, userId, branchName string, plan *Plan) (*shared.CurrentPla
 
 	if len(pendingNewFilesSet) > 0 {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in ApplyPlan: %v\n%s", r, debug.Stack())
+					errCh <- fmt.Errorf("panic in ApplyPlan: %v\n%s", r, debug.Stack())
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
 			loadReq := shared.LoadContextRequest{}
 			for path := range pendingNewFilesSet {
 				loadReq = append(loadReq, &shared.LoadContextParams{
@@ -504,29 +639,41 @@ func ApplyPlan(orgId, userId, branchName string, plan *Plan) (*shared.CurrentPla
 				})
 			}
 
-			res, _, err := LoadContexts(
-				LoadContextsParams{
-					OrgId:                    orgId,
-					UserId:                   userId,
-					Plan:                     plan,
-					BranchName:               branchName,
-					Req:                      &loadReq,
-					SkipConflictInvalidation: true, // no need to invalidate conflicts when applying plan--and fixes race condition since invalidation check loads description
-				},
-			)
+			if len(loadReq) > 0 {
+				res, _, err := LoadContexts(
+					ctx,
+					LoadContextsParams{
+						OrgId:                    orgId,
+						UserId:                   userId,
+						Plan:                     plan,
+						BranchName:               branchName,
+						Req:                      &loadReq,
+						SkipConflictInvalidation: true, // no need to invalidate conflicts when applying plan--and fixes race condition since invalidation check loads description
+						AutoLoaded:               true,
+					},
+				)
 
-			if err != nil {
-				errCh <- fmt.Errorf("error loading context: %v", err)
-				return
+				if err != nil {
+					errCh <- fmt.Errorf("error loading context: %v", err)
+					return
+				}
+
+				loadContextRes = res
 			}
 
-			loadContextRes = res
 			errCh <- nil
 		}()
 	}
 
 	if len(pendingUpdatedFilesSet) > 0 {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in ApplyPlan: %v\n%s", r, debug.Stack())
+					errCh <- fmt.Errorf("panic in ApplyPlan: %v\n%s", r, debug.Stack())
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
 			updateReq := shared.UpdateContextRequest{}
 			for path := range pendingUpdatedFilesSet {
 				context := contextsByPath[path]
@@ -535,45 +682,93 @@ func ApplyPlan(orgId, userId, branchName string, plan *Plan) (*shared.CurrentPla
 				}
 			}
 
-			res, err := UpdateContexts(
-				UpdateContextsParams{
-					OrgId:                    orgId,
-					Plan:                     plan,
-					BranchName:               branchName,
-					Req:                      &updateReq,
-					SkipConflictInvalidation: true, // no need to invalidate conflicts when applying plan--and fixes race condition since invalidation check loads description
-				},
-			)
+			if len(updateReq) > 0 {
+				res, err := UpdateContexts(
+					UpdateContextsParams{
+						OrgId:                    orgId,
+						Plan:                     plan,
+						BranchName:               branchName,
+						Req:                      &updateReq,
+						SkipConflictInvalidation: true, // no need to invalidate conflicts when applying plan--and fixes race condition since invalidation check loads description
+					},
+				)
 
-			if err != nil {
-				errCh <- fmt.Errorf("error updating context: %v", err)
-				return
+				if err != nil {
+					errCh <- fmt.Errorf("error updating context: %v", err)
+					return
+				}
+
+				updateContextRes = res
 			}
-
-			updateContextRes = res
 			errCh <- nil
 
 		}()
 
 	}
 
-	numRoutines := len(pendingDbResults) +
-		len(convoMessageDescriptions)
-	if len(pendingNewFilesSet) > 0 {
-		numRoutines++
-	}
-	if len(pendingUpdatedFilesSet) > 0 {
-		numRoutines++
-	}
-
 	for i := 0; i < numRoutines; i++ {
 		err := <-errCh
 		if err != nil {
-			return nil, fmt.Errorf("error applying plan: %v", err)
+			return fmt.Errorf("error applying plan: %v", err)
 		}
 	}
 
+	// Store the PlanApply record
+	planApply := &PlanApply{
+		Id:        uuid.New().String(),
+		OrgId:     orgId,
+		PlanId:    planId,
+		UserId:    userId,
+		CommitMsg: params.CommitMsg,
+		CreatedAt: now,
+	}
+
+	// Collect the IDs from the pending results and descriptions
+	var resultIds []string
+	var descriptionIds []string
+	var messageIds []string
+
+	for _, result := range pendingDbResults {
+		resultIds = append(resultIds, result.Id)
+	}
+	for _, desc := range convoMessageDescriptions {
+		descriptionIds = append(descriptionIds, desc.Id)
+		messageIds = append(messageIds, desc.ConvoMessageId)
+	}
+
+	planApply.PlanFileResultIds = resultIds
+	planApply.ConvoMessageDescriptionIds = descriptionIds
+	planApply.ConvoMessageIds = messageIds
+
+	// Store the PlanApply object
+	bytes, err := json.MarshalIndent(planApply, "", "  ")
+	if err != nil {
+		return fmt.Errorf("error marshalling plan apply: %v", err)
+	}
+
+	appliesDir := getPlanAppliesDir(orgId, planId)
+	err = os.MkdirAll(appliesDir, 0755)
+	if err != nil {
+		return fmt.Errorf("error creating applies dir: %v", err)
+	}
+
+	err = os.WriteFile(filepath.Join(appliesDir, planApply.Id+".json"), bytes, 0644)
+	if err != nil {
+		return fmt.Errorf("error writing plan apply file: %v", err)
+	}
+
 	msg := "✅ Marked pending results as applied"
+
+	currentFiles := currentPlanState.CurrentPlanFiles.Files
+	var sortedFiles []string
+	for path := range currentFiles {
+		sortedFiles = append(sortedFiles, path)
+	}
+	sort.Strings(sortedFiles)
+	for _, path := range sortedFiles {
+		msg += fmt.Sprintf("\n • 📄 %s", path)
+	}
+	msg += "\n" + "✏️  " + params.CommitMsg
 
 	if loadContextRes != nil && !loadContextRes.MaxTokensExceeded {
 		msg += "\n\n" + loadContextRes.Msg
@@ -583,13 +778,13 @@ func ApplyPlan(orgId, userId, branchName string, plan *Plan) (*shared.CurrentPla
 		msg += "\n\n" + updateContextRes.Msg
 	}
 
-	err := GitAddAndCommit(orgId, plan.Id, branchName, msg)
+	err = repo.GitAddAndCommit(branchName, msg)
 
 	if err != nil {
-		return nil, fmt.Errorf("error committing plan: %v", err)
+		return fmt.Errorf("error committing plan: %v", err)
 	}
 
-	return currentPlanState, nil
+	return nil
 }
 
 func RejectAllResults(orgId, planId string) error {
@@ -612,6 +807,13 @@ func RejectAllResults(orgId, planId string) error {
 		resultId := strings.TrimSuffix(file.Name(), ".json")
 
 		go func(resultId string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in RejectAllResults: %v\n%s", r, debug.Stack())
+					errCh <- fmt.Errorf("panic in RejectAllResults: %v\n%s", r, debug.Stack())
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
 			err := RejectPlanFile(orgId, planId, resultId, now)
 
 			if err != nil {
@@ -652,6 +854,13 @@ func DeletePendingResultsForPaths(orgId, planId string, paths map[string]bool) e
 		resultId := strings.TrimSuffix(file.Name(), ".json")
 
 		go func(resultId string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in DeletePendingResultsForPaths: %v\n%s", r, debug.Stack())
+					errCh <- fmt.Errorf("panic in DeletePendingResultsForPaths: %v\n%s", r, debug.Stack())
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
 			bytes, err := os.ReadFile(filepath.Join(resultsDir, resultId+".json"))
 
 			if err != nil {
@@ -699,6 +908,13 @@ func RejectPlanFiles(orgId, planId string, files []string, now time.Time) error 
 
 	for _, file := range files {
 		go func(file string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in RejectPlanFiles: %v\n%s", r, debug.Stack())
+					errCh <- fmt.Errorf("panic in RejectPlanFiles: %v\n%s", r, debug.Stack())
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
 			err := RejectPlanFile(orgId, planId, file, now)
 
 			if err != nil {
@@ -732,6 +948,13 @@ func RejectPlanFile(orgId, planId, filePathOrResultId string, now time.Time) err
 
 	for _, result := range results {
 		go func(result *PlanFileResult) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in RejectPlanFile: %v\n%s", r, debug.Stack())
+					errCh <- fmt.Errorf("panic in RejectPlanFile: %v\n%s", r, debug.Stack())
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
 			if (result.Path == filePathOrResultId || result.Id == filePathOrResultId) && result.AppliedAt == nil && result.RejectedAt == nil {
 				result.RejectedAt = &now
 			} else {
@@ -801,4 +1024,63 @@ func RejectReplacement(orgId, planId, resultId, replacementId string) error {
 	}
 
 	return nil
+}
+
+func GetPlanApplies(orgId, planId string) ([]*PlanApply, error) {
+	appliesDir := getPlanAppliesDir(orgId, planId)
+	files, err := os.ReadDir(appliesDir)
+
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("error reading applies dir: %v", err)
+	}
+
+	planApplies := []*PlanApply{}
+	var mu sync.Mutex
+
+	errCh := make(chan error, len(files))
+
+	for _, file := range files {
+		go func(file os.DirEntry) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in GetPlanApplies: %v\n%s", r, debug.Stack())
+					errCh <- fmt.Errorf("panic in GetPlanApplies: %v\n%s", r, debug.Stack())
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
+			bytes, err := os.ReadFile(filepath.Join(appliesDir, file.Name()))
+
+			if err != nil {
+				errCh <- fmt.Errorf("error reading apply file: %v", err)
+				return
+			}
+
+			var apply PlanApply
+			err = json.Unmarshal(bytes, &apply)
+
+			if err != nil {
+				errCh <- fmt.Errorf("error unmarshalling apply file: %v", err)
+				return
+			}
+
+			mu.Lock()
+			planApplies = append(planApplies, &apply)
+			mu.Unlock()
+
+			errCh <- nil
+		}(file)
+	}
+
+	for i := 0; i < len(files); i++ {
+		err := <-errCh
+		if err != nil {
+			return nil, fmt.Errorf("error getting plan applies: %v", err)
+		}
+	}
+
+	return planApplies, nil
 }

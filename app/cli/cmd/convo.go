@@ -2,10 +2,11 @@ package cmd
 
 import (
 	"fmt"
-	"plandex/api"
-	"plandex/auth"
-	"plandex/lib"
-	"plandex/term"
+	"plandex-cli/api"
+	"plandex-cli/auth"
+	"plandex-cli/lib"
+	"plandex-cli/term"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 )
 
 var plainTextOutput bool
+var convoRaw bool
 
 // convoCmd represents the convo command
 var convoCmd = &cobra.Command{
@@ -27,6 +29,10 @@ func init() {
 	RootCmd.AddCommand(convoCmd)
 
 	convoCmd.Flags().BoolVarP(&plainTextOutput, "plain", "p", false, "Output conversation in plain text with no ANSI codes")
+
+	// for debugging output
+	convoCmd.Flags().BoolVar(&convoRaw, "raw", false, "Output conversation in raw format")
+	convoCmd.Flags().MarkHidden("raw")
 }
 
 const stoppedEarlyMsg = "You stopped the reply early"
@@ -97,6 +103,8 @@ func convo(cmd *cobra.Command, args []string) {
 			author = msg.Role
 		}
 
+		replyTags := msg.Flags.GetReplyTags()
+
 		// format as above but start with day of week
 		formattedTs := msg.CreatedAt.Local().Format("Mon Jan 2, 2006 | 3:04pm MST")
 
@@ -110,13 +118,24 @@ func convo(cmd *cobra.Command, args []string) {
 			formattedTs = msg.CreatedAt.Local().Format("Yesterday | 3:04pm MST")
 		}
 
-		header := fmt.Sprintf("#### %d | %s | %s | %d 🪙 ", i+1,
-			author, formattedTs, msg.Tokens)
+		var header string
+		if len(replyTags) > 0 {
+			header = fmt.Sprintf("#### %d | %s | %s | %s | %d 🪙 ", i+1,
+				author, strings.Join(replyTags, " | "), formattedTs, msg.Tokens)
+		} else {
+			header = fmt.Sprintf("#### %d | %s | %s | %d 🪙 ", i+1,
+				author, formattedTs, msg.Tokens)
+		}
+
+		txt := msg.Message
+		if !convoRaw {
+			txt = convertCodeBlocks(msg.Message)
+		}
 
 		if plainTextOutput {
-			convo += header + "\n" + msg.Message + "\n\n"
+			convo += header + "\n" + txt + "\n\n"
 		} else {
-			md, err := term.GetMarkdown(header + "\n" + msg.Message + "\n\n")
+			md, err := term.GetMarkdown(header + "\n" + txt + "\n\n")
 			if err != nil {
 				term.OutputErrorAndExit("Error creating markdown representation: %v", err)
 			}
@@ -154,4 +173,21 @@ func convo(cmd *cobra.Command, args []string) {
 		fmt.Println()
 		term.PrintCmds("", "convo 1", "convo 2-5", "convo --plain", "log")
 	}
+}
+
+var codeBlockPattern = regexp.MustCompile(`<PlandexBlock\s+lang="(.+?)".*?>([\s\S]+?)</PlandexBlock>`)
+
+func convertCodeBlocks(msg string) string {
+	return codeBlockPattern.ReplaceAllStringFunc(msg, func(match string) string {
+		// Extract language and content from the match
+		submatches := codeBlockPattern.FindStringSubmatch(match)
+		lang := submatches[1]
+		content := submatches[2]
+
+		// Escape any backticks in the content
+		content = strings.ReplaceAll(content, "```", "\\`\\`\\`")
+
+		// Return markdown code block format
+		return fmt.Sprintf("```%s%s```", lang, content)
+	})
 }

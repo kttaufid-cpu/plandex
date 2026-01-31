@@ -1,3 +1,98 @@
+## Server Version 2.2.1
+See CLI 2.2.1 release notes.
+
+## Server Version 2.2.1
+See CLI 2.2.1 release notes.
+
+## Server Version 2.2.0
+See CLI 2.2.0 release notes.
+
+## Server Version 2.1.8
+- Fix for potential hang in file map queue
+
+## Server Version 2.1.7
+- Fix for "conversation summary timestamp not found in conversation" error (https://github.com/plandex-ai/plandex/issues/274)
+- Fix for potential panic/crash during plan stream (https://github.com/plandex-ai/plandex/issues/275)
+- Better protection against panics/crashes in server goroutines across the board
+
+## Server Version 2.1.6+1
+See CLI 2.1.6+1 release notes.
+
+## Server Version 2.1.6
+See CLI 2.1.6 release notes.
+
+## Server Version 2.1.5
+See CLI 2.1.5 release notes.
+
+## Server Version 2.1.4
+- Fix to remove occasional extraneous blank lines from start/end of edited files.
+
+## Server Version 2.1.3
+- Fix for 'panic in execTellPlan' error when using a model pack that doesn't explicitly set the 'coder' or 'whole-file-builder' roles
+
+## Server Version 2.1.2
+- Fix for auto-load context error: 'Error decoding response → EOF'
+
+## Server Version 2.1.1+1
+- Improve error handling to catch yet another "context length exceeded" error message variation from Anthropic.
+
+## Server Version 2.1.1
+See CLI 2.1.1 release notes.
+
+## Server Version 2.1.0+1
+- Fix for context length exceeded error that still wasn't being caught and retried by the fallback correctly.
+
+## Server Version 2.1.0
+See CLI 2.1.0 release notes.
+
+## Server Version 2.0.6
+- Improvements to process management and cleanup for command execution
+- Remove extraneous model request logging
+
+## Server Version 2.0.5
+- Fix for a bug that was causing occasional model errors. Model calls should be much more reliable now.
+- Better error handling and error messages for model errors (rate limits or other errors).
+- No error retries for rate limit errors.
+- Fixed bug that caused retries to add the prompt to the conversation multiple times.
+- Error responses with no output no longer create a log entry.
+
+## Server Version 2.0.4
+- **Stability**
+  - Enhanced database locking mechanisms.
+  - Improved error notifications.
+
+- **API Enhancements**
+  - Added endpoints for managing custom models and updating model packs.
+
+- **Execution**
+  - Increased robustness in plan execution and subprocess lifecycle management.
+
+- **Observability**
+  - Real-time internal notifications for critical errors implemented.
+
+- **Consistency**
+  - Improved token management.
+  - Enhanced summarization accuracy.
+
+## Server Version 2.0.3
+- Fix for potential crash during chat/tell operation.
+- Panic handling to prevent crashes in general.
+- Fix for local queue handling bug during builds that could cause queue to get stuck and cause subsequent operations to hang.
+
+## Server Version 2.0.2
+Server-side fix for context auto-load hanging when there's no valid context to load (for example, if they're all directories, which is only discovered client-side, and which can't be auto-loaded)
+
+## Server Version 2.0.0+2
+- Version tag sanitation fix for GitHub Action to build and push server image to DockerHub
+
+## Server Version 2.0.0+1
+- Fix for custom model creation (https://github.com/plandex-ai/plandex/issues/214)
+- Fix for version check on self-hosted (https://github.com/plandex-ai/plandex/issues/213)
+- Fix for GitHub Action to build and push server image to DockerHub
+
+## Server Version 2.0.0
+See CLI 2.0.0 release notes.
+
 ## Version 1.1.1
 - Improvements to stream handling that greatly reduce flickering in the terminal when streaming a plan, especially when many files are being built simultaneously. CPU usage is also reduced on both the client and server side.
 - Claude 3.5 Sonnet model and model pack (via OpenRouter.ai) is now built-in.

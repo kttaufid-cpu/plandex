@@ -4,28 +4,49 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"plandex/api"
-	"plandex/auth"
-	"plandex/fs"
-	"plandex/stream"
-	streamtui "plandex/stream_tui"
-	"plandex/term"
+	"plandex-cli/api"
+	"plandex-cli/auth"
+	"plandex-cli/fs"
+	"plandex-cli/stream"
+	streamtui "plandex-cli/stream_tui"
+	"plandex-cli/term"
+	"plandex-cli/types"
+	"plandex-cli/ui"
+	"time"
+
+	shared "plandex-shared"
 
 	"github.com/fatih/color"
-	"github.com/plandex/plandex/shared"
+	"github.com/shopspring/decimal"
 )
+
+// For cloud trials in Integrated Models mode, we warn after the stream finishes when the balance is less than $1
+const CloudTrialBalanceWarningThreshold = 1
 
 func TellPlan(
 	params ExecParams,
 	prompt string,
-	tellBg,
-	tellStop,
-	tellNoBuild,
-	isUserContinue,
-	isDebugCmd,
-	isChatOnly bool,
+	flags types.TellFlags,
 ) {
+
+	tellBg := flags.TellBg
+	tellStop := flags.TellStop
+	tellNoBuild := flags.TellNoBuild
+	isUserContinue := flags.IsUserContinue
+	isDebugCmd := flags.IsUserDebug
+	isChatOnly := flags.IsChatOnly
+	autoContext := flags.AutoContext
+	smartContext := flags.SmartContext
+	execEnabled := flags.ExecEnabled
+	autoApply := flags.AutoApply
+	isApplyDebug := flags.IsApplyDebug
+	isImplementationOfChat := flags.IsImplementationOfChat
+	skipChangesMenu := flags.SkipChangesMenu
 	done := make(chan struct{})
+
+	if prompt == "" && isImplementationOfChat {
+		prompt = "Go ahead with the plan based on what we've discussed so far."
+	}
 
 	outputPromptIfTell := func() {
 		if isUserContinue || prompt == "" {
@@ -41,6 +62,15 @@ func TellPlan(
 	}
 
 	term.StartSpinner("")
+
+	err := PromptSyncModelsIfNeeded()
+	if err != nil {
+		outputPromptIfTell()
+		term.OutputErrorAndExit("Error syncing models: %v", err)
+	}
+
+	term.StartSpinner("")
+
 	contexts, apiErr := api.Client.ListContext(params.CurrentPlanId, params.CurrentBranch)
 
 	if apiErr != nil {
@@ -48,7 +78,14 @@ func TellPlan(
 		term.OutputErrorAndExit("Error getting context: %v", apiErr)
 	}
 
-	anyOutdated, didUpdate, err := params.CheckOutdatedContext(contexts)
+	paths, err := fs.GetProjectPaths(fs.GetBaseDirForContexts(contexts))
+
+	if err != nil {
+		outputPromptIfTell()
+		term.OutputErrorAndExit("Error getting project paths: %v", err)
+	}
+
+	anyOutdated, didUpdate, err := params.CheckOutdatedContext(contexts, paths)
 
 	if err != nil {
 		outputPromptIfTell()
@@ -69,15 +106,6 @@ func TellPlan(
 		os.Exit(0)
 	}
 
-	term.StartSpinner("")
-	paths, err := fs.GetProjectPaths(fs.GetBaseDirForContexts(contexts))
-	term.StopSpinner()
-
-	if err != nil {
-		outputPromptIfTell()
-		term.OutputErrorAndExit("Error getting project paths: %v", err)
-	}
-
 	var fn func() bool
 	fn = func() bool {
 
@@ -88,38 +116,38 @@ func TellPlan(
 			buildMode = shared.BuildModeAuto
 		}
 
-		if isUserContinue {
-			term.StartSpinner("⚡️ Continuing plan...")
-		} else {
-			term.StartSpinner("💬 Sending prompt...")
+		// if isUserContinue {
+		// 	term.StartSpinner("⚡️ Continuing plan...")
+		// } else {
+		// 	term.StartSpinner("💬 Sending prompt...")
+		// }
+
+		term.StartSpinner("")
+
+		var osDetails string
+		if execEnabled {
+			osDetails = term.GetOsDetails()
 		}
 
-		var legacyApiKey, openAIBase, openAIOrgId string
-
-		if params.ApiKeys["OPENAI_API_KEY"] != "" {
-			openAIBase = os.Getenv("OPENAI_API_BASE")
-			if openAIBase == "" {
-				openAIBase = os.Getenv("OPENAI_ENDPOINT")
-			}
-
-			legacyApiKey = params.ApiKeys["OPENAI_API_KEY"]
-			openAIOrgId = params.ApiKeys["OPENAI_ORG_ID"]
-		}
+		isGitRepo := fs.ProjectRootIsGitRepo()
 
 		apiErr := api.Client.TellPlan(params.CurrentPlanId, params.CurrentBranch, shared.TellPlanRequest{
-			Prompt:         prompt,
-			ConnectStream:  !tellBg,
-			AutoContinue:   !tellStop,
-			ProjectPaths:   paths.ActivePaths,
-			BuildMode:      buildMode,
-			IsUserContinue: isUserContinue,
-			IsUserDebug:    isDebugCmd,
-			IsChatOnly:     isChatOnly,
-			ApiKey:         legacyApiKey, // deprecated
-			Endpoint:       openAIBase,   // deprecated
-			ApiKeys:        params.ApiKeys,
-			OpenAIBase:     openAIBase,
-			OpenAIOrgId:    openAIOrgId,
+			Prompt:                 prompt,
+			ConnectStream:          !tellBg,
+			AutoContinue:           !tellStop,
+			ProjectPaths:           paths.ActivePaths,
+			BuildMode:              buildMode,
+			IsUserContinue:         isUserContinue,
+			IsUserDebug:            isDebugCmd,
+			IsChatOnly:             isChatOnly,
+			AutoContext:            autoContext,
+			SmartContext:           smartContext,
+			ExecEnabled:            execEnabled,
+			OsDetails:              osDetails,
+			AuthVars:               params.AuthVars,
+			IsImplementationOfChat: isImplementationOfChat,
+			IsGitRepo:              isGitRepo,
+			SessionId:              os.Getenv("PLANDEX_REPL_SESSION_ID"),
 		}, stream.OnStreamPlan)
 
 		term.StopSpinner()
@@ -156,23 +184,86 @@ func TellPlan(
 
 		if !tellBg {
 			go func() {
-				err := streamtui.StartStreamUI(prompt, false)
+				err := streamtui.StartStreamUI(
+					prompt,
+					false,
+					!(autoApply || autoContext || isApplyDebug || isDebugCmd),
+				)
 
 				if err != nil {
 					outputPromptIfTell()
 					term.OutputErrorAndExit("Error starting stream UI: %v", err)
 				}
 
-				fmt.Println()
+				if auth.Current.IsCloud && auth.Current.IntegratedModelsMode && auth.Current.OrgIsTrial {
+					term.StartSpinner("")
+					balance, apiErr := api.Client.GetBalance()
+					term.StopSpinner()
+					if apiErr != nil {
+						term.OutputErrorAndExit("Error getting balance: %v", apiErr.Msg)
+						return
+					}
 
-				if tellStop && !isChatOnly {
-					term.PrintCmds("", "continue", "diff", "diff --ui", "apply", "log")
-				} else if !isDebugCmd && !isChatOnly {
-					term.PrintCmds("", "diff", "diff --ui", "apply", "log")
-				} else if isChatOnly {
-					term.PrintCmds("", "tell", "convo", "summary")
+					if balance.LessThan(decimal.NewFromInt(CloudTrialBalanceWarningThreshold)) {
+						color.New(term.ColorHiYellow, color.Bold).Printf("\n⚠️  Your Plandex Cloud trial has $%s in credits remaining\n\n", balance.StringFixed(2))
+
+						const continueOpt = "Continue"
+						const billingSettingsOpt = "Go to billing settings (then continue)"
+
+						opts := []string{continueOpt, billingSettingsOpt}
+						choice, err := term.SelectFromList("What do you want to do?", opts)
+						if err != nil {
+							term.OutputErrorAndExit("Error selecting option: %v", err)
+						}
+
+						if choice == billingSettingsOpt {
+							ui.OpenAuthenticatedURL("Opening billing settings in your browser.", "/settings/billing")
+						}
+					}
+				}
+
+				if isChatOnly {
+					term.StopSpinner()
+					if !term.IsRepl {
+						term.PrintCmds("", "tell", "convo", "summary", "log")
+					}
+				} else if autoApply || isDebugCmd || isApplyDebug {
+					term.StopSpinner()
+					// do nothing, allow auto apply to run
+				} else if skipChangesMenu {
+					term.StopSpinner()
+					// script mode, don't show menu
+				} else {
+					term.StartSpinner("")
+					// sleep a little to prevent lock contention on server
+					time.Sleep(500 * time.Millisecond)
+					diffs, apiErr := getDiffs(params)
+					term.StopSpinner()
+					if apiErr != nil {
+						term.OutputErrorAndExit("Error getting plan diffs: %v", apiErr.Msg)
+						return
+					}
+					numDiffs := len(diffs)
+					hasDiffs := numDiffs > 0
+
+					fmt.Println()
+
+					if tellStop && hasDiffs {
+						if hasDiffs {
+							// term.PrintCmds("", "continue", "diff", "diff --ui", "apply", "reject", "log")
+							showHotkeyMenu(diffs)
+							handleHotkey(diffs, params)
+						} else {
+							term.PrintCmds("", "continue", "log")
+						}
+					} else if hasDiffs {
+						// term.PrintCmds("", "diff", "diff --ui", "apply", "reject", "log")
+						showHotkeyMenu(diffs)
+						handleHotkey(diffs, params)
+					}
 				}
 				close(done)
+
 			}()
 		}
 

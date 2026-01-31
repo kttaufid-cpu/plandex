@@ -1,6 +1,10 @@
 .plandex/
 .plandex-dev/
+.plandex-v2/
+.plandex-dev-v2/
 .envkey
+.env
+.env.*
 plandex
 plandex-dev
 plandex-server
@@ -13,5 +17,11 @@ node_modules/
 .DS_Store
 .goreleaser.yml
 dist/
+__pycache__/
 
 .aider.*
+*.code-workspace
+
+__pycache__/
+
+.repo_ignore

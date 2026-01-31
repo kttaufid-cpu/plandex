@@ -9,32 +9,42 @@ import (
 	"plandex-server/db"
 	"plandex-server/model"
 	"plandex-server/model/prompts"
+	"plandex-server/notify"
 	"plandex-server/types"
 	"time"
 
+	shared "plandex-shared"
+
 	"github.com/davecgh/go-spew/spew"
-	"github.com/plandex/plandex/shared"
 	"github.com/sashabaranov/go-openai"
 )
 
-func (state *activeTellStreamState) injectSummariesAsNeeded() bool {
-	convo := state.convo
+func (state *activeTellStreamState) addConversationMessages() bool {
 	summaries := state.summaries
 	tokensBeforeConvo := state.tokensBeforeConvo
-
 	active := GetActivePlan(state.plan.Id, state.branch)
+
+	convo := []*db.ConvoMessage{}
+	for _, msg := range state.convo {
+		if state.skipConvoMessages != nil && state.skipConvoMessages[msg.Id] {
+			continue
+		}
+		convo = append(convo, msg)
+	}
 
 	if active == nil {
 		log.Println("summarizeMessagesIfNeeded - Active plan not found")
 		return false
 	}
 
-	conversationTokens := prompts.ExtraTokensPerRequest
+	conversationTokens := 0
 	tokensUpToTimestamp := make(map[int64]int)
+	convoMessagesById := make(map[string]*db.ConvoMessage)
 	for _, convoMessage := range convo {
-		conversationTokens += convoMessage.Tokens + prompts.ExtraTokensPerMessage
+		conversationTokens += convoMessage.Tokens + model.TokensPerMessage + model.TokensPerName
 		timestamp := convoMessage.CreatedAt.UnixNano() / int64(time.Millisecond)
 		tokensUpToTimestamp[timestamp] = conversationTokens
+		convoMessagesById[convoMessage.Id] = convoMessage
 		// log.Printf("Timestamp: %s | Tokens: %d | Total: %d | conversationTokens\n", convoMessage.Timestamp, convoMessage.Tokens, conversationTokens)
 	}
 
@@ -68,23 +78,32 @@ func (state *activeTellStreamState) injectSummariesAsNeeded() bool {
 			log.Printf("Tokens up to timestamp: %d\n", tokens)
 
 			if !ok {
-				err := fmt.Errorf("conversation summary timestamp not found in conversation")
-				log.Printf("Error: %v\n", err)
+				// try a fallback by id instead of timestamp, in case timestamp rounding caused it to be missing
+				convoMessage, ok := convoMessagesById[s.LatestConvoMessageId]
 
-				log.Println("timestamp:", timestamp)
-
-				// log.Println("Conversation summary:")
-				// spew.Dump(s)
-
-				log.Println("tokensUpToTimestamp:")
-				log.Println(spew.Sdump(tokensUpToTimestamp))
-
-				active.StreamDoneCh <- &shared.ApiError{
-					Type:   shared.ApiErrorTypeOther,
-					Status: http.StatusInternalServerError,
-					Msg:    "Conversation summary timestamp not found in conversation",
+				if ok {
+					timestamp = convoMessage.CreatedAt.UnixNano() / int64(time.Millisecond)
+					tokens, ok = tokensUpToTimestamp[timestamp]
 				}
-				return false
+
+				if !ok {
+					// instead of erroring here as we did previously, we'll just log and continue
+					// if no summary is found, we still handle it as an error below
+					// but this way we don't error out completely for  a single detached summary
+
+					log.Println("conversation summary timestamp not found in conversation")
+					log.Println("timestamp:", timestamp)
+
+					// log.Println("Conversation summary:")
+					// spew.Dump(s)
+
+					log.Println("tokensUpToTimestamp:")
+					log.Println(spew.Sdump(tokensUpToTimestamp))
+
+					go notify.NotifyErr(notify.SeverityInfo, fmt.Errorf("conversation summary timestamp not found in conversation"))
+
+					continue
+				}
 			}
 
 			updatedConversationTokens := (conversationTokens - tokens) + s.Tokens
@@ -103,9 +122,11 @@ func (state *activeTellStreamState) injectSummariesAsNeeded() bool {
 			}
 		}
 
-		if summary == nil {
+		if summary == nil && tokensBeforeConvo+conversationTokens > state.settings.GetPlannerEffectiveMaxTokens() {
 			err := errors.New("couldn't get under token limit with conversation summary")
 			log.Printf("Error: %v\n", err)
+			go notify.NotifyErr(notify.SeverityInfo, fmt.Errorf("couldn't get under token limit with conversation summary"))
+
 			active.StreamDoneCh <- &shared.ApiError{
 				Type:   shared.ApiErrorTypeOther,
 				Status: http.StatusInternalServerError,
@@ -122,21 +143,38 @@ func (state *activeTellStreamState) injectSummariesAsNeeded() bool {
 
 	if summary == nil {
 		for _, convoMessage := range convo {
-			state.messages = append(state.messages, openai.ChatCompletionMessage{
-				Role:    convoMessage.Role,
-				Content: convoMessage.Message,
+			// this gets added later in tell_exec.go
+			if state.promptConvoMessage != nil && convoMessage.Id == state.promptConvoMessage.Id {
+				continue
+			}
+
+			state.messages = append(state.messages, types.ExtendedChatMessage{
+				Role: openai.ChatMessageRoleUser,
+				Content: []types.ExtendedChatMessagePart{
+					{
+						Type: openai.ChatMessagePartTypeText,
+						Text: convoMessage.Message,
+					},
+				},
 			})
 
 			// add the latest summary as a conversation message if this is the last message summarized, in order to reinforce the current state of the plan to the model
 			if latestSummary != nil && convoMessage.Id == latestSummary.LatestConvoMessageId {
-				state.messages = append(state.messages, openai.ChatCompletionMessage{
-					Role:    openai.ChatMessageRoleAssistant,
-					Content: latestSummary.Summary,
+				state.messages = append(state.messages, types.ExtendedChatMessage{
+					Role: openai.ChatMessageRoleAssistant,
+					Content: []types.ExtendedChatMessagePart{
+						{
+							Type: openai.ChatMessagePartTypeText,
+							Text: latestSummary.Summary,
+						},
+					},
 				})
 			}
 		}
 	} else {
 		if (tokensBeforeConvo + conversationTokens) > state.settings.GetPlannerEffectiveMaxTokens() {
+			go notify.NotifyErr(notify.SeverityError, fmt.Errorf("token limit still exceeded after summarizing conversation"))
+
 			active.StreamDoneCh <- &shared.ApiError{
 				Type:   shared.ApiErrorTypeOther,
 				Status: http.StatusInternalServerError,
@@ -145,31 +183,49 @@ func (state *activeTellStreamState) injectSummariesAsNeeded() bool {
 			return false
 		}
 		state.summarizedToMessageId = summary.LatestConvoMessageId
-		state.messages = append(state.messages, openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleAssistant,
-			Content: summary.Summary,
+		state.messages = append(state.messages, types.ExtendedChatMessage{
+			Role: openai.ChatMessageRoleAssistant,
+			Content: []types.ExtendedChatMessagePart{
+				{
+					Type: openai.ChatMessagePartTypeText,
+					Text: summary.Summary,
+				},
+			},
 		})
 
 		// add messages after the last message in the summary
 		for _, convoMessage := range convo {
+			// this gets added later in tell_exec.go
+			if state.promptConvoMessage != nil && convoMessage.Id == state.promptConvoMessage.Id {
+				continue
+			}
+
 			if convoMessage.CreatedAt.After(summary.LatestConvoMessageCreatedAt) {
-				state.messages = append(state.messages, openai.ChatCompletionMessage{
-					Role:    convoMessage.Role,
-					Content: convoMessage.Message,
+				state.messages = append(state.messages, types.ExtendedChatMessage{
+					Role: openai.ChatMessageRoleUser,
+					Content: []types.ExtendedChatMessagePart{
+						{
+							Type: openai.ChatMessagePartTypeText,
+							Text: convoMessage.Message,
+						},
+					},
 				})
 
 				// add the latest summary as a conversation message if this is the last message summarized, in order to reinforce the current state of the plan to the model
 				if latestSummary != nil && convoMessage.Id == latestSummary.LatestConvoMessageId {
-					state.messages = append(state.messages, openai.ChatCompletionMessage{
-						Role:    openai.ChatMessageRoleAssistant,
-						Content: latestSummary.Summary,
+					state.messages = append(state.messages, types.ExtendedChatMessage{
+						Role: openai.ChatMessageRoleAssistant,
+						Content: []types.ExtendedChatMessagePart{
+							{
+								Type: openai.ChatMessagePartTypeText,
+								Text: latestSummary.Summary,
+							},
+						},
 					})
 				}
 			}
 		}
 	}
-
-	state.totalRequestTokens = tokensBeforeConvo + conversationTokens
 
 	return true
 }
@@ -187,7 +243,7 @@ type summarizeConvoParams struct {
 	modelPackName         string
 }
 
-func summarizeConvo(client *openai.Client, config shared.ModelRoleConfig, params summarizeConvoParams, ctx context.Context) error {
+func summarizeConvo(clients map[string]model.ClientInfo, authVars map[string]string, settings *shared.PlanSettings, orgUserConfig *shared.OrgUserConfig, params summarizeConvoParams, ctx context.Context) *shared.ApiError {
 	plan := params.plan
 	planId := plan.Id
 	log.Printf("summarizeConvo: Called for plan ID %s on branch %s\n", planId, params.branch)
@@ -200,9 +256,16 @@ func summarizeConvo(client *openai.Client, config shared.ModelRoleConfig, params
 	currentReply := params.currentReply
 	active := GetActivePlan(planId, branch)
 
+	config := settings.GetModelPack().PlanSummary
+
 	if active == nil {
 		log.Printf("Active plan not found for plan ID %s and branch %s\n", planId, branch)
-		return fmt.Errorf("active plan not found for plan ID %s and branch %s", planId, branch)
+
+		return &shared.ApiError{
+			Type:   shared.ApiErrorTypeOther,
+			Status: http.StatusInternalServerError,
+			Msg:    fmt.Sprintf("active plan not found for plan ID %s and branch %s", planId, branch),
+		}
 	}
 
 	log.Println("Generating plan summary for planId:", planId)
@@ -216,7 +279,7 @@ func summarizeConvo(client *openai.Client, config shared.ModelRoleConfig, params
 	// spew.Dump(promptMessage)
 	// log.Printf("currentOrgId: %s\n", currentOrgId)
 
-	var summaryMessages []*openai.ChatCompletionMessage
+	var summaryMessages []*types.ExtendedChatMessage
 	var latestSummary *db.ConvoSummary
 	var numMessagesSummarized int = 0
 	var latestMessageSummarizedAt time.Time
@@ -232,26 +295,36 @@ func summarizeConvo(client *openai.Client, config shared.ModelRoleConfig, params
 	// log.Println("Generating plan summary - convo:")
 	// spew.Dump(convo)
 
-	numTokens := prompts.ExtraTokensPerRequest
+	numTokens := 0
 
 	if latestSummary == nil {
 		for _, convoMessage := range convo {
-			summaryMessages = append(summaryMessages, &openai.ChatCompletionMessage{
-				Role:    convoMessage.Role,
-				Content: convoMessage.Message,
+			summaryMessages = append(summaryMessages, &types.ExtendedChatMessage{
+				Role: openai.ChatMessageRoleUser,
+				Content: []types.ExtendedChatMessagePart{
+					{
+						Type: openai.ChatMessagePartTypeText,
+						Text: convoMessage.Message,
+					},
+				},
 			})
 			latestMessageId = convoMessage.Id
 			latestMessageSummarizedAt = convoMessage.CreatedAt
 			numMessagesSummarized++
-			numTokens += convoMessage.Tokens + prompts.ExtraTokensPerMessage
+			numTokens += convoMessage.Tokens + model.TokensPerMessage + model.TokensPerName
 		}
 	} else {
-		summaryMessages = append(summaryMessages, &openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleAssistant,
-			Content: latestSummary.Summary,
+		summaryMessages = append(summaryMessages, &types.ExtendedChatMessage{
+			Role: openai.ChatMessageRoleAssistant,
+			Content: []types.ExtendedChatMessagePart{
+				{
+					Type: openai.ChatMessagePartTypeText,
+					Text: latestSummary.Summary,
+				},
+			},
 		})
 
-		numTokens += latestSummary.Tokens + prompts.ExtraTokensPerMessage
+		numTokens += latestSummary.Tokens + model.TokensPerMessage + model.TokensPerName
 
 		var found bool
 		for _, convoMessage := range convo {
@@ -260,12 +333,17 @@ func summarizeConvo(client *openai.Client, config shared.ModelRoleConfig, params
 				continue
 			}
 			if found {
-				summaryMessages = append(summaryMessages, &openai.ChatCompletionMessage{
-					Role:    convoMessage.Role,
-					Content: convoMessage.Message,
+				summaryMessages = append(summaryMessages, &types.ExtendedChatMessage{
+					Role: openai.ChatMessageRoleUser,
+					Content: []types.ExtendedChatMessagePart{
+						{
+							Type: openai.ChatMessagePartTypeText,
+							Text: convoMessage.Message,
+						},
+					},
 				})
 				numMessagesSummarized++
-				numTokens += convoMessage.Tokens + prompts.ExtraTokensPerMessage
+				numTokens += convoMessage.Tokens + model.TokensPerMessage + model.TokensPerName
 			}
 		}
 
@@ -278,29 +356,34 @@ func summarizeConvo(client *openai.Client, config shared.ModelRoleConfig, params
 	log.Println("generating summary - latestMessageSummarizedAt:", latestMessageSummarizedAt)
 
 	if userPrompt != "" {
-		if userPrompt != prompts.UserContinuePrompt && userPrompt != prompts.AutoContinuePrompt {
-			summaryMessages = append(summaryMessages, &openai.ChatCompletionMessage{
-				Role:    openai.ChatMessageRoleUser,
-				Content: userPrompt,
+		if userPrompt != prompts.UserContinuePrompt && userPrompt != prompts.AutoContinuePlanningPrompt && userPrompt != prompts.AutoContinueImplementationPrompt {
+			summaryMessages = append(summaryMessages, &types.ExtendedChatMessage{
+				Role: openai.ChatMessageRoleUser,
+				Content: []types.ExtendedChatMessagePart{
+					{
+						Type: openai.ChatMessagePartTypeText,
+						Text: userPrompt,
+					},
+				},
 			})
 
-			tokens, err := shared.GetNumTokens(userPrompt)
-			if err != nil {
-				log.Printf("Error getting num tokens for user prompt: %v\n", err)
-				return err
-			}
-
-			numTokens += tokens + prompts.ExtraTokensPerMessage
+			tokens := shared.GetNumTokensEstimate(userPrompt)
+			numTokens += tokens + model.TokensPerMessage + model.TokensPerName
 		}
 	}
 
 	if currentReply != "" {
-		summaryMessages = append(summaryMessages, &openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleAssistant,
-			Content: currentReply,
+		summaryMessages = append(summaryMessages, &types.ExtendedChatMessage{
+			Role: openai.ChatMessageRoleAssistant,
+			Content: []types.ExtendedChatMessagePart{
+				{
+					Type: openai.ChatMessagePartTypeText,
+					Text: currentReply,
+				},
+			},
 		})
 
-		numTokens += params.currentReplyNumTokens + prompts.ExtraTokensPerMessage
+		numTokens += params.currentReplyNumTokens + model.TokensPerMessage + model.TokensPerName
 	}
 
 	log.Printf("Calling model for plan summary. Summarizing %d messages\n", len(summaryMessages))
@@ -308,10 +391,10 @@ func summarizeConvo(client *openai.Client, config shared.ModelRoleConfig, params
 	// log.Println("Generating summary - summary messages:")
 	// spew.Dump(summaryMessages)
 
-	latestSummaryCh := make(chan *db.ConvoSummary, 1)
-	active.LatestSummaryCh = latestSummaryCh
+	// latestSummaryCh := make(chan *db.ConvoSummary, 1)
+	// active.LatestSummaryCh = latestSummaryCh
 
-	summary, err := model.PlanSummary(client, config, model.PlanSummaryParams{
+	summary, apiErr := model.PlanSummary(clients, authVars, settings, orgUserConfig, config, model.PlanSummaryParams{
 		Conversation:                summaryMessages,
 		ConversationNumTokens:       numTokens,
 		LatestConvoMessageId:        latestMessageId,
@@ -320,11 +403,13 @@ func summarizeConvo(client *openai.Client, config shared.ModelRoleConfig, params
 		Auth:                        params.auth,
 		Plan:                        plan,
 		ModelPackName:               params.modelPackName,
+		ModelStreamId:               active.ModelStreamId,
+		SessionId:                   active.SessionId,
 	}, ctx)
 
-	if err != nil {
-		log.Printf("summarizeConvo: Error generating plan summary for plan %s: %v\n", planId, err)
-		return err
+	if apiErr != nil {
+		log.Printf("summarizeConvo: Error generating plan summary for plan %s: %v\n", planId, apiErr)
+		return apiErr
 	}
 
 	log.Printf("summarizeConvo: Summary generated and stored for plan %s\n", planId)
@@ -332,14 +417,18 @@ func summarizeConvo(client *openai.Client, config shared.ModelRoleConfig, params
 	// log.Println("Generated summary:")
 	// spew.Dump(summary)
 
-	err = db.StoreSummary(summary)
+	err := db.StoreSummary(summary)
 
 	if err != nil {
 		log.Printf("Error storing plan summary for plan %s: %v\n", planId, err)
-		return err
+		return &shared.ApiError{
+			Type:   shared.ApiErrorTypeOther,
+			Status: http.StatusInternalServerError,
+			Msg:    fmt.Sprintf("error storing plan summary for plan %s: %v", planId, err),
+		}
 	}
 
-	latestSummaryCh <- summary
+	// latestSummaryCh <- summary
 
 	return nil
 }

@@ -10,7 +10,7 @@ import (
 	"plandex-server/host"
 	"time"
 
-	"github.com/plandex/plandex/shared"
+	shared "plandex-shared"
 )
 
 func proxyActivePlanMethod(w http.ResponseWriter, r *http.Request, planId, branch, method string) {
@@ -60,7 +60,7 @@ func proxyRequest(w http.ResponseWriter, originalRequest *http.Request, url stri
 	}
 
 	// Create a new request based on the original request
-	req, err := http.NewRequest(originalRequest.Method, url, originalRequest.Body)
+	req, err := http.NewRequestWithContext(originalRequest.Context(), originalRequest.Method, url, originalRequest.Body)
 	if err != nil {
 		log.Printf("Error creating request for proxy: %v\n", err)
 		http.Error(w, "Error creating request for proxy", http.StatusInternalServerError)
@@ -95,6 +95,8 @@ func proxyRequest(w http.ResponseWriter, originalRequest *http.Request, url stri
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
+
+	log.Printf("Proxy forwarded successfully with status code: %d\n", resp.StatusCode)
 
 	// Copy the response body
 	if _, err := io.Copy(w, resp.Body); err != nil {

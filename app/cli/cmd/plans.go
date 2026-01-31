@@ -11,16 +11,17 @@ import (
 	"strings"
 	"time"
 
-	"plandex/api"
-	"plandex/auth"
-	"plandex/format"
-	"plandex/fs"
-	"plandex/lib"
-	"plandex/term"
+	"plandex-cli/api"
+	"plandex-cli/auth"
+	"plandex-cli/format"
+	"plandex-cli/fs"
+	"plandex-cli/lib"
+	"plandex-cli/term"
+
+	shared "plandex-shared"
 
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
-	"github.com/plandex/plandex/shared"
 	"github.com/spf13/cobra"
 	"github.com/xlab/treeprint"
 )
@@ -168,6 +169,8 @@ func listActive() {
 	}
 	childProjectIdsWithPaths = childProjectIdsWithPathsFiltered
 
+	var b strings.Builder
+
 	if len(currentProjectPlanIds) > 0 {
 		currentBranchNamesByPlanId, err := lib.GetCurrentBranchNamesByPlanId(currentProjectPlanIds)
 
@@ -183,15 +186,15 @@ func listActive() {
 			term.OutputErrorAndExit("Error getting current branches: %v", apiErr)
 		}
 
-		table := tablewriter.NewWriter(os.Stdout)
+		table := tablewriter.NewWriter(&b)
 		table.SetAutoWrapText(false)
 		table.SetHeader([]string{"#", "Name", "Updated" /*, "Created" /*"Branches",*/, "Branch", "Context", "Convo"})
 
 		currentProjectPlans := plansByProjectId[lib.CurrentProjectId]
 		if len(parentProjectIdsWithPaths) > 0 || len(childProjectIdsWithPaths) > 0 {
-			color.New(color.Bold, term.ColorHiGreen).Print("Plans in current directory\n")
+			b.WriteString(color.New(color.Bold, term.ColorHiGreen).Sprint("Plans in current directory\n"))
 		} else {
-			fmt.Println()
+			b.WriteString("\n")
 		}
 		for i, p := range currentProjectPlans {
 			num := strconv.Itoa(i + 1)
@@ -236,7 +239,7 @@ func listActive() {
 		table.Render()
 
 	} else {
-		fmt.Println("🤷‍♂️ No plans in current directory")
+		b.WriteString("🤷‍♂️ No plans in current directory\n")
 	}
 
 	var addPathToTreeFn func(tree treeprint.Tree, basePath, localPath, projectId string, isParent bool)
@@ -300,10 +303,10 @@ func listActive() {
 	}
 
 	if len(parentProjectIdsWithPaths) > 0 {
-		fmt.Println()
+		b.WriteString("\n")
 
-		color.New(color.Bold).Println("Plans in parent directories")
-		color.New(c).Println("cd into a directory to work on a plan in that directory")
+		b.WriteString(color.New(color.Bold).Sprint("Plans in parent directories\n"))
+		b.WriteString(color.New(c).Sprint("cd into a directory to work on a plan in that directory\n"))
 		parentTree := treeprint.NewWithRoot("~")
 
 		for i := len(parentProjectIdsWithPaths) - 1; i >= 0; i-- {
@@ -317,13 +320,13 @@ func listActive() {
 
 			addPathToTreeFn(parentTree, "", rel, p[1], true)
 		}
-		fmt.Print(parentTree.String())
+		b.WriteString(parentTree.String())
 	}
 
 	if len(childProjectIdsWithPaths) > 0 {
-		fmt.Println()
-		color.New(color.Bold).Println("Plans in child directories")
-		color.New(c).Println("cd into a directory to work on a plan in that directory")
+		b.WriteString("\n")
+		b.WriteString(color.New(color.Bold).Sprint("Plans in child directories\n"))
+		b.WriteString(color.New(c).Sprint("cd into a directory to work on a plan in that directory\n"))
 		childTree := treeprint.New()
 		for _, p := range childProjectIdsWithPaths {
 			rel, err := filepath.Rel(fs.Cwd, p[0])
@@ -334,10 +337,12 @@ func listActive() {
 
 			addPathToTreeFn(childTree, "", rel, p[1], false)
 		}
-		fmt.Println(childTree.String())
+		b.WriteString(childTree.String())
 	} else {
-		fmt.Println()
+		b.WriteString("\n")
 	}
+
+	term.PageOutput(b.String())
 
 	fmt.Println()
 	if len(currentProjectPlanIds) > 0 {
@@ -369,7 +374,8 @@ func listArchived() {
 		return
 	}
 
-	table := tablewriter.NewWriter(os.Stdout)
+	var b strings.Builder
+	table := tablewriter.NewWriter(&b)
 	table.SetAutoWrapText(false)
 	table.SetHeader([]string{"#", "Name", "Updated"})
 
@@ -400,6 +406,8 @@ func listArchived() {
 
 	}
 	table.Render()
+
+	term.PageOutput(b.String())
 
 	fmt.Println()
 	term.PrintCmds("", "unarchive")

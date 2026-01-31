@@ -5,7 +5,7 @@ import (
 	"log"
 	"plandex-server/db"
 
-	"github.com/plandex/plandex/shared"
+	shared "plandex-shared"
 )
 
 func (ap *ActivePlan) PendingBuildsByPath(orgId, userId string, convoMessagesArg []*db.ConvoMessage) (map[string][]*ActiveBuild, error) {
@@ -38,7 +38,7 @@ func (ap *ActivePlan) PendingBuildsByPath(orgId, userId string, convoMessagesArg
 	activeBuildsByPath := map[string][]*ActiveBuild{}
 
 	for _, desc := range planDescs {
-		if (!desc.DidBuild && len(desc.Files) > 0) || len(desc.BuildPathsInvalidated) > 0 {
+		if (!desc.DidBuild && len(desc.Operations) > 0) || len(desc.BuildPathsInvalidated) > 0 {
 			if desc.ConvoMessageId == "" {
 				log.Printf("No convo message ID for description: %v\n", desc)
 				return nil, fmt.Errorf("no convo message ID for description: %v", desc)
@@ -49,41 +49,35 @@ func (ap *ActivePlan) PendingBuildsByPath(orgId, userId string, convoMessagesArg
 				return nil, fmt.Errorf("no convo message for ID: %s", desc.ConvoMessageId)
 			}
 
-			convoMessage := convoMessagesById[desc.ConvoMessageId]
+			// convoMessage := convoMessagesById[desc.ConvoMessageId]
 
-			replyParser := NewReplyParser()
-			replyParser.AddChunk(convoMessage.Message, false)
-			parserRes := replyParser.FinishAndRead()
+			// replyParser := NewReplyParser()
+			// replyParser.AddChunk(convoMessage.Message, false)
+			// parserRes := replyParser.FinishAndRead()
 
-			for i, file := range desc.Files {
+			numAdded := 0
+			for _, op := range desc.Operations {
 
-				if desc.DidBuild && !desc.BuildPathsInvalidated[file] {
+				if desc.DidBuild && !desc.BuildPathsInvalidated[op.Path] {
 					continue
 				}
 
-				if activeBuildsByPath[file] == nil {
-					activeBuildsByPath[file] = []*ActiveBuild{}
+				if activeBuildsByPath[op.Path] == nil {
+					activeBuildsByPath[op.Path] = []*ActiveBuild{}
 				}
 
-				fileContent := parserRes.FileContents[i]
-				fileDesc := parserRes.FileDescriptions[i]
+				numTokens := shared.GetNumTokensEstimate(op.Content)
 
-				numTokens, err := shared.GetNumTokens(fileContent)
-
-				if err != nil {
-					log.Printf("Error getting num tokens for file content: %v\n", err)
-					return nil, fmt.Errorf("error getting num tokens for file content: %v", err)
-				}
-
-				activeBuildsByPath[file] = append(activeBuildsByPath[file], &ActiveBuild{
+				activeBuildsByPath[op.Path] = append(activeBuildsByPath[op.Path], &ActiveBuild{
 					ReplyId:           desc.ConvoMessageId,
-					Idx:               i,
-					FileContent:       fileContent,
+					FileContent:       op.Content,
 					FileContentTokens: numTokens,
-					Path:              file,
-					FileDescription:   fileDesc,
+					Path:              op.Path,
+					FileDescription:   op.Description,
 				})
+				numAdded++
 			}
+
 		}
 	}
 

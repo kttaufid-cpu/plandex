@@ -1,248 +1,208 @@
 package plan
 
 import (
-	"encoding/xml"
+	"context"
 	"fmt"
 	"log"
-	"math/rand"
 	"plandex-server/db"
+	diff_pkg "plandex-server/diff"
 	"plandex-server/hooks"
-	"plandex-server/model"
-	"plandex-server/model/prompts"
 	"plandex-server/syntax"
-	"plandex-server/types"
+	"plandex-server/utils"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
-	"github.com/plandex/plandex/shared"
-	"github.com/sashabaranov/go-openai"
+	shared "plandex-shared"
 )
 
 func (fileState *activeBuildStreamFileState) buildStructuredEdits() {
-	auth := fileState.auth
 	filePath := fileState.filePath
 	activeBuild := fileState.activeBuild
-	clients := fileState.clients
 	planId := fileState.plan.Id
 	branch := fileState.branch
-	config := fileState.settings.ModelPack.Builder
 	originalFile := fileState.preBuildState
 	parser := fileState.parser
 
 	if parser == nil {
-		log.Println("buildStructuredEdits - tree-sitter parser is nil")
-		fileState.onBuildFileError(fmt.Errorf("tree-sitter parser is nil"))
-		return
+		log.Printf("buildStructuredEdits - tree-sitter parser is nil for file %s\n", filePath)
 	}
 
 	activePlan := GetActivePlan(planId, branch)
-
 	if activePlan == nil {
 		log.Printf("Active plan not found for plan ID %s and branch %s\n", planId, branch)
 		fileState.onBuildFileError(fmt.Errorf("active plan not found for plan ID %s and branch %s", planId, branch))
 		return
 	}
 
-	proposedContentLines := strings.Split(activeBuild.FileContent, "\n")
-	originalContentLines := strings.Split(originalFile, "\n")
+	buildCtx, cancelBuild := context.WithCancel(activePlan.Ctx)
 
-	log.Println("buildStructuredEdits - getting references prompt")
+	proposedContent := activeBuild.FileContent
+	desc := activeBuild.FileDescription
 
-	anchorsSysPrompt := prompts.GetSemanticAnchorsPrompt(filePath, originalFile, activeBuild.FileContent, activeBuild.FileDescription)
+	descLower := strings.ToLower(desc)
+	isReplaceOrRemove := strings.Contains(descLower, "type: replace") || strings.Contains(descLower, "type: remove") || strings.Contains(descLower, "type: overwrite")
 
-	anchorsFileMessages := []openai.ChatCompletionMessage{
-		{
-			Role:    openai.ChatMessageRoleSystem,
-			Content: anchorsSysPrompt,
+	var autoApplyRes *syntax.ApplyChangesResult
+	var autoApplySyntaxErrors []string
+
+	calledFastApply := false
+	var fastApplyRes string
+	fastApplyCh := make(chan string, 1)
+
+	callFastApply := func() {
+		log.Printf("buildStructuredEdits - %s - calling fast apply hook\n", filePath)
+		fileState.builderRun.DidFastApply = true
+		fileState.builderRun.FastApplyStartedAt = time.Now()
+		calledFastApply = true
+
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in callFastApply: %v\n%s", r, debug.Stack())
+					fastApplyCh <- ""
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
+
+			res, err := hooks.ExecHook(hooks.CallFastApply, hooks.HookParams{
+				FastApplyParams: &hooks.FastApplyParams{
+					InitialCode: originalFile,
+					EditSnippet: proposedContent,
+					Language:    fileState.language,
+					Ctx:         buildCtx,
+				},
+			})
+
+			if err != nil {
+				log.Printf("buildStructuredEdits - error executing fast apply hook: %v\n", err)
+				// empty string acts as a no-op
+				fastApplyCh <- ""
+				return
+			} else if res.FastApplyResult == nil {
+				log.Printf("buildStructuredEdits - fast apply hook returned nil result\n")
+				// empty string acts as a no-op
+				fastApplyCh <- ""
+				return
+			}
+
+			fastApplyRes = res.FastApplyResult.MergedCode
+			log.Printf("buildStructuredEdits - %s - got fast apply hook result\n", filePath)
+			// fmt.Printf("buildStructuredEdits - fastApplyRes:\n%s", fastApplyRes)
+
+			fileState.builderRun.FastApplyFinishedAt = time.Now()
+
+			fastApplyCh <- fastApplyRes
+		}()
+	}
+
+	if isReplaceOrRemove {
+		callFastApply()
+	}
+
+	log.Printf("buildStructuredEdits - %s - applying changes\n", filePath)
+	// Apply plan logic
+	log.Printf("buildStructuredEdits - %s - calling ApplyChanges\n", filePath)
+	autoApplyRes = syntax.ApplyChanges(
+		buildCtx,
+		syntax.ApplyChangesParams{
+			Original:               originalFile,
+			Proposed:               proposedContent,
+			Desc:                   desc,
+			AddMissingStartEndRefs: true,
+			Parser:                 fileState.parser,
+			Language:               fileState.language,
 		},
+	)
+	log.Printf("buildStructuredEdits - %s - got ApplyChanges result\n", filePath)
+	// log.Printf("buildStructuredEdits - autoApplyRes.NewFile:\n\n%s", autoApplyRes.NewFile)
+	log.Println("buildStructuredEdits - autoApplyRes.NeedsVerifyReasons:", autoApplyRes.NeedsVerifyReasons)
+
+	autoApplySyntaxErrors = fileState.validateSyntax(buildCtx, autoApplyRes.NewFile)
+
+	hasNeedsVerifyReasons := len(autoApplyRes.NeedsVerifyReasons) > 0
+
+	autoApplyHasSyntaxErrors := len(autoApplySyntaxErrors) > 0
+	autoApplyIsValid := !autoApplyHasSyntaxErrors && !hasNeedsVerifyReasons
+
+	if !autoApplyIsValid && !calledFastApply {
+		callFastApply()
 	}
 
-	promptTokens, err := shared.GetNumTokens(anchorsSysPrompt)
+	log.Printf("buildStructuredEdits - %s - autoApplyHasSyntaxErrors: %t, hasNeedsVerifyReasons: %t, autoApplyIsValid: %t\n",
+		filePath, autoApplyHasSyntaxErrors, hasNeedsVerifyReasons, autoApplyIsValid)
 
-	if err != nil {
-		log.Printf("buildStructuredEdits - error getting num tokens for prompt: %v\n", err)
-		fileState.onBuildFileError(fmt.Errorf("error getting num tokens for prompt: %v", err))
-		return
-	}
+	updated := autoApplyRes.NewFile
 
-	inputTokens := prompts.ExtraTokensPerRequest + prompts.ExtraTokensPerMessage + promptTokens
-
-	fileState.inputTokens = inputTokens
-
-	_, apiErr := hooks.ExecHook(hooks.WillSendModelRequest, hooks.HookParams{
-		Auth: auth,
-		Plan: fileState.plan,
-		WillSendModelRequestParams: &hooks.WillSendModelRequestParams{
-			InputTokens:  inputTokens,
-			OutputTokens: shared.AvailableModelsByName[fileState.settings.ModelPack.Builder.BaseModelConfig.ModelName].DefaultReservedOutputTokens,
-			ModelName:    fileState.settings.ModelPack.Builder.BaseModelConfig.ModelName,
-		},
-	})
-	if apiErr != nil {
-		activePlan.StreamDoneCh <- apiErr
-		return
-	}
-
-	log.Println("buildStructuredEdits - calling model for references")
-
-	modelReq := openai.ChatCompletionRequest{
-		Model:       config.BaseModelConfig.ModelName,
-		Messages:    anchorsFileMessages,
-		Temperature: config.Temperature,
-		TopP:        config.TopP,
-	}
-
-	envVar := config.BaseModelConfig.ApiKeyEnvVar
-	client := clients[envVar]
-
-	resp, err := model.CreateChatCompletionWithRetries(client, activePlan.Ctx, modelReq)
-
-	if err != nil {
-		log.Printf("buildStructuredEdits - error calling model: %v\n", err)
-		fileState.structuredEditRetryOrError(fmt.Errorf("error calling model: %v", err))
-		return
-	}
-
-	log.Println("buildStructuredEdits - usage:")
-	spew.Dump(resp.Usage)
-
-	_, apiErr = hooks.ExecHook(hooks.DidSendModelRequest, hooks.HookParams{
-		Auth: auth,
-		Plan: fileState.plan,
-		DidSendModelRequestParams: &hooks.DidSendModelRequestParams{
-			InputTokens:   resp.Usage.PromptTokens,
-			OutputTokens:  resp.Usage.CompletionTokens,
-			ModelName:     fileState.settings.ModelPack.Builder.BaseModelConfig.ModelName,
-			ModelProvider: fileState.settings.ModelPack.Builder.BaseModelConfig.Provider,
-			ModelPackName: fileState.settings.ModelPack.Name,
-			ModelRole:     shared.ModelRoleBuilder,
-			Purpose:       "Generated file update (structured edits)",
-		},
-	})
-
-	if apiErr != nil {
-		activePlan.StreamDoneCh <- apiErr
-		return
-	}
-
-	if len(resp.Choices) == 0 {
-		log.Printf("buildStructuredEdits - no choices in response\n")
-		fileState.structuredEditRetryOrError(fmt.Errorf("no choices in response"))
-		return
-	}
-
-	refsChoice := resp.Choices[0]
-	content := refsChoice.Message.Content
-
-	log.Println("buildStructuredEdits - content:")
-	log.Println(content)
-
-	anchorsXmlString, err := GetXMLTag(content, "PlandexSemanticAnchors")
-	if err != nil {
-		log.Printf("buildStructuredEdits - error parsing PlandexSemanticAnchors xml: %v\n", err)
-		fileState.structuredEditRetryOrError(fmt.Errorf("error parsing PlandexSemanticAnchors xml xml: %v", err))
-		return
-	}
-
-	summaryXmlString, err := GetXMLTag(content, "PlandexSummary")
-	if err != nil {
-		log.Printf("buildStructuredEdits - error parsing PlandexSummary xml: %v\n", err)
-	}
-
-	var summaryElement types.SummaryTag
-	if summaryXmlString != "" {
-		err = xml.Unmarshal([]byte(summaryXmlString), &summaryElement)
-		if err != nil {
-			log.Printf("buildStructuredEdits - error unmarshalling Summary xml: %v\n", err)
+	// If no problems, we trust the direct ApplyChanges result
+	if autoApplyIsValid {
+		log.Printf("buildStructuredEdits - %s - changes are valid, using ApplyChanges result\n", filePath)
+		fileState.builderRun.AutoApplySuccess = true
+	} else {
+		log.Printf("buildStructuredEdits - %s - auto apply has syntax errors or NeedsVerifyReasons", filePath)
+		fileState.builderRun.AutoApplyValidationReasons = make([]string, len(autoApplyRes.NeedsVerifyReasons))
+		for i, reason := range autoApplyRes.NeedsVerifyReasons {
+			fileState.builderRun.AutoApplyValidationReasons[i] = string(reason)
 		}
-	}
 
-	var anchorsElement types.SemanticAnchorsTag
+		fileState.builderRun.AutoApplyValidationSyntaxErrors = autoApplySyntaxErrors
 
-	err = xml.Unmarshal([]byte(anchorsXmlString), &anchorsElement)
-	if err != nil {
-		log.Printf("buildStructuredEdits - error unmarshalling xml: %v\n", err)
-		fileState.structuredEditRetryOrError(fmt.Errorf("error unmarshalling xml: %v", err))
-		return
-	}
+		buildRaceParams := buildRaceParams{
+			updated:         updated,
+			proposedContent: proposedContent,
+			desc:            desc,
+			reasons:         autoApplyRes.NeedsVerifyReasons,
+			syntaxErrors:    autoApplySyntaxErrors,
 
-	log.Printf("buildStructuredEdits - got %d anchors\n", len(anchorsElement.Anchors))
+			didCallFastApply: calledFastApply,
+			fastApplyCh:      fastApplyCh,
 
-	anchorLines := make(map[int]int)
+			sessionId: activePlan.SessionId,
+		}
 
-	for _, anchor := range anchorsElement.Anchors {
-		fmt.Printf("anchor: %v\n", anchor)
-
-		var originalLine, proposedLine int
-		originalLine, err = shared.ExtractLineNumberWithPrefix(anchor.OriginalLine, "pdx-")
+		buildRaceResult, err := fileState.buildRace(buildCtx, cancelBuild, buildRaceParams)
 		if err != nil {
-			log.Printf("buildStructuredEdits - error parsing anchor original line num: %v\n", err)
-			fileState.structuredEditRetryOrError(fmt.Errorf("error parsing anchor original line num: %v", err))
+			if apiErr, ok := err.(*shared.ApiError); ok {
+				activePlan.StreamDoneCh <- apiErr
+				return
+			} else {
+				log.Printf("buildStructuredEdits - %s - error building race: %v\n", filePath, err)
+				fileState.onBuildFileError(fmt.Errorf("error building race: %v", err))
+			}
 			return
 		}
 
-		proposedLine, err = shared.ExtractLineNumberWithPrefix(anchor.ProposedLine, "pdx-new-")
-		if err != nil {
-			log.Printf("buildStructuredEdits - error parsing anchor proposed line num: %v\n", err)
-			fileState.structuredEditRetryOrError(fmt.Errorf("error parsing anchor proposed line num: %v", err))
-			return
-		}
-
-		proposedContent := proposedContentLines[proposedLine-1]
-		originalContent := originalContentLines[originalLine-1]
-
-		if proposedContent != originalContent {
-			anchorLines[proposedLine] = originalLine
-		}
+		updated = buildRaceResult.content
 	}
 
-	fileContentLines := strings.Split(activeBuild.FileContent, "\n")
-
-	var references []syntax.Reference
-	var removals []syntax.Removal
-
-	for i, line := range fileContentLines {
-		line = strings.ToLower(strings.TrimSpace(line))
-		if strings.Contains(line, "... existing code ...") {
-			references = append(references, syntax.Reference(i+1))
-		}
-		if strings.Contains(line, "plandex: removed code") {
-			removals = append(removals, syntax.Removal(i+1))
-		}
-	}
-
-	updatedFile, err := syntax.ApplyChanges(activePlan.Ctx, fileState.language, parser, originalFile, activeBuild.FileContent, references, removals, anchorLines)
-	if err != nil {
-		log.Printf("buildStructuredEdits - error applying references: %v\n", err)
-		fileState.structuredEditRetryOrError(fmt.Errorf("error applying references: %v", err))
-		return
-	}
-
+	// output diff and store build results
 	buildInfo := &shared.BuildInfo{
 		Path:      filePath,
 		NumTokens: 0,
 		Finished:  true,
 	}
+	log.Printf("streaming build info for finished file %s\n", filePath)
 	activePlan.Stream(shared.StreamMessage{
 		Type:      shared.StreamMessageBuildInfo,
 		BuildInfo: buildInfo,
 	})
 	time.Sleep(50 * time.Millisecond)
 
-	fileState.updated = updatedFile
+	// strip any blank lines from beginning/end of updated file
+	updated = utils.StripAddedBlankLines(originalFile, updated)
 
-	replacements, err := db.GetDiffReplacements(originalFile, updatedFile)
+	log.Printf("buildStructuredEdits - %s - getting diff replacements\n", filePath)
+	replacements, err := diff_pkg.GetDiffReplacements(originalFile, updated)
 	if err != nil {
 		log.Printf("buildStructuredEdits - error getting diff replacements: %v\n", err)
-		fileState.structuredEditRetryOrError(fmt.Errorf("error getting diff replacements: %v", err))
+		fileState.onBuildFileError(fmt.Errorf("error getting diff replacements: %v", err))
 		return
 	}
+	log.Printf("buildStructuredEdits - %s - got %d replacements\n", filePath, len(replacements))
 
-	if summaryElement.Content != "" {
-		for _, replacement := range replacements {
-			replacement.Summary = strings.TrimSpace(summaryElement.Content)
-		}
+	for _, replacement := range replacements {
+		replacement.Summary = strings.TrimSpace(desc)
 	}
 
 	res := db.PlanFileResult{
@@ -254,53 +214,25 @@ func (fileState *activeBuildStreamFileState) buildStructuredEdits() {
 		Content:        "",
 		Path:           filePath,
 		Replacements:   replacements,
-		CanVerify:      false, // no verification step with structural edits
 	}
 
-	if !fileState.preBuildStateSyntaxInvalid {
-		validationRes, err := syntax.Validate(activePlan.Ctx, filePath, updatedFile)
-		if err != nil {
-			log.Printf("buildStructuredEdits - error validating syntax: %v\n", err)
-			fileState.structuredEditRetryOrError(fmt.Errorf("error validating syntax: %v", err))
-			return
-		}
-
-		if validationRes.HasParser && !validationRes.TimedOut && !validationRes.Valid {
-			log.Printf("buildStructuredEdits - syntax is invalid\n")
-		}
-
-		res.SyntaxValid = validationRes.Valid
-		res.SyntaxErrors = validationRes.Errors
-	}
-
-	fileState.onFinishBuildFile(&res, updatedFile)
+	log.Printf("buildStructuredEdits - %s - finishing build file\n", filePath)
+	fileState.onFinishBuildFile(&res)
 }
 
-func (fileState *activeBuildStreamFileState) structuredEditRetryOrError(err error) {
-	if fileState.structuredEditNumRetry < MaxBuildErrorRetries {
-		fileState.structuredEditNumRetry++
-
-		log.Printf("buildStructuredEdits - retrying structured edits file '%s' due to error: %v\n", fileState.filePath, err)
-
-		activePlan := GetActivePlan(fileState.plan.Id, fileState.branch)
-
-		if activePlan == nil {
-			log.Printf("buildStructuredEdits - active plan not found for plan ID %s and branch %s\n", fileState.plan.Id, fileState.branch)
-			fileState.onBuildFileError(fmt.Errorf("active plan not found for plan ID %s and branch %s", fileState.plan.Id, fileState.branch))
-			return
+func (fileState *activeBuildStreamFileState) validateSyntax(buildCtx context.Context, updated string) []string {
+	if fileState.parser != nil && !fileState.preBuildStateSyntaxInvalid && !fileState.syntaxCheckTimedOut {
+		validationRes, err := syntax.ValidateWithParsers(buildCtx, fileState.language, fileState.parser, "", nil, updated) // fallback parser was already set as fileState.parser if needed during initial preBuildState syntax check
+		if err != nil {
+			log.Printf("buildStructuredEdits - error validating updated file: %v\n", err)
+		} else if validationRes.TimedOut {
+			log.Printf("buildStructuredEdits - syntax check timed out for updated file\n")
+			fileState.syntaxCheckTimedOut = true
+			return nil
+		} else {
+			return validationRes.Errors
 		}
-
-		select {
-		case <-activePlan.Ctx.Done():
-			log.Printf("buildStructuredEdits - context canceled\n")
-			return
-		case <-time.After(time.Duration(fileState.structuredEditNumRetry*fileState.structuredEditNumRetry)*200*time.Millisecond + time.Duration(rand.Intn(500))*time.Millisecond):
-			break
-		}
-
-		fileState.buildStructuredEdits()
-	} else {
-		fileState.onBuildFileError(err)
 	}
 
+	return nil
 }

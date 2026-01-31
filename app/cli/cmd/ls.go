@@ -3,12 +3,14 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"plandex/api"
-	"plandex/auth"
-	"plandex/format"
-	"plandex/lib"
-	"plandex/term"
+	"plandex-cli/api"
+	"plandex-cli/auth"
+	"plandex-cli/format"
+	"plandex-cli/lib"
+	"plandex-cli/term"
 	"strconv"
+
+	shared "plandex-shared"
 
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
@@ -28,13 +30,20 @@ func listContext(cmd *cobra.Command, args []string) {
 
 	term.StartSpinner("")
 	contexts, err := api.Client.ListContext(lib.CurrentPlanId, lib.CurrentBranch)
-	term.StopSpinner()
 
 	if err != nil {
 		term.OutputErrorAndExit("Error listing context: %v", err)
 	}
 
+	planConfig, err := api.Client.GetPlanConfig(lib.CurrentPlanId)
+	if err != nil {
+		term.OutputErrorAndExit("Error getting plan config: %v", err)
+	}
+	term.StopSpinner()
+
 	totalTokens := 0
+	totalPlannerTokens := 0
+	totalMapTokens := 0
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"#", "Name", "Type", "🪙", "Added", "Updated"})
 	table.SetAutoWrapText(false)
@@ -49,9 +58,18 @@ func listContext(cmd *cobra.Command, args []string) {
 	for i, context := range contexts {
 		totalTokens += context.NumTokens
 
+		if context.ContextType == shared.ContextMapType {
+			totalMapTokens += context.NumTokens
+		} else {
+			totalPlannerTokens += context.NumTokens
+		}
+
 		t, icon := context.TypeAndIcon()
 
 		name := context.Name
+		if name == "" {
+			name = context.FilePath
+		}
 		if len(name) > 40 {
 			name = name[:20] + "⋯" + name[len(name)-20:]
 		}
@@ -74,8 +92,16 @@ func listContext(cmd *cobra.Command, args []string) {
 
 	tokensTbl := tablewriter.NewWriter(os.Stdout)
 	tokensTbl.SetAutoWrapText(false)
-	tokensTbl.Append([]string{color.New(term.ColorHiCyan, color.Bold).Sprintf("Total tokens →") + color.New(color.Bold).Sprintf(" %d 🪙", totalTokens)})
 
+	if planConfig.AutoLoadContext {
+		tokensTbl.Append([]string{
+			color.New(term.ColorHiCyan, color.Bold).Sprintf("Map tokens →") + color.New(color.Bold).Sprintf(" %d 🪙", totalMapTokens),
+			color.New(term.ColorHiCyan, color.Bold).Sprintf("Context tokens →") + color.New(color.Bold).Sprintf(" %d 🪙", totalPlannerTokens),
+		})
+	} else {
+
+		tokensTbl.Append([]string{color.New(term.ColorHiCyan, color.Bold).Sprintf("Total tokens →") + color.New(color.Bold).Sprintf(" %d 🪙", totalTokens)})
+	}
 	tokensTbl.Render()
 
 	fmt.Println()

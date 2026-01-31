@@ -2,19 +2,21 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
-	"plandex/api"
-	"plandex/auth"
-	"plandex/lib"
-	"plandex/term"
+	"plandex-cli/api"
+	"plandex-cli/auth"
+	"plandex-cli/lib"
+	"plandex-cli/term"
+	"plandex-cli/types"
+
+	shared "plandex-shared"
 
 	"github.com/fatih/color"
-	"github.com/plandex/plandex/shared"
 	"github.com/spf13/cobra"
 )
 
 var name string
+var contextBaseDir string
 
 // newCmd represents the new command
 var newCmd = &cobra.Command{
@@ -29,6 +31,9 @@ var newCmd = &cobra.Command{
 func init() {
 	RootCmd.AddCommand(newCmd)
 	newCmd.Flags().StringVarP(&name, "name", "n", "", "Name of the new plan")
+	newCmd.Flags().StringVar(&contextBaseDir, "context-dir", ".", "Base directory to auto-load context from")
+
+	AddNewPlanFlags(newCmd)
 }
 
 func new(cmd *cobra.Command, args []string) {
@@ -36,46 +41,94 @@ func new(cmd *cobra.Command, args []string) {
 	lib.MustResolveOrCreateProject()
 
 	term.StartSpinner("")
-	res, apiErr := api.Client.CreatePlan(lib.CurrentProjectId, shared.CreatePlanRequest{Name: name})
-	term.StopSpinner()
 
-	if apiErr != nil {
-		if apiErr.Type == shared.ApiErrorTypeTrialPlansExceeded {
-			fmt.Fprintf(os.Stderr, "🚨 You've reached the Plandex Cloud trial limit of %d plans\n", apiErr.TrialPlansExceededError.MaxPlans)
+	errCh := make(chan error, 2)
 
-			res, err := term.ConfirmYesNo("Upgrade now?")
+	var planId string
+	var config *shared.PlanConfig
 
-			if err != nil {
-				term.OutputErrorAndExit("Error prompting upgrade trial: %v", err)
-			}
+	go func() {
+		res, apiErr := api.Client.CreatePlan(lib.CurrentProjectId, shared.CreatePlanRequest{Name: name})
+		if apiErr != nil {
+			errCh <- fmt.Errorf("error creating plan: %v", apiErr.Msg)
+			return
+		}
+		planId = res.Id
+		errCh <- nil
+	}()
 
-			if res {
-				auth.ConvertTrial()
-				// re-run the command
-				new(cmd, args)
-				return
-			} else {
-				return
-			}
+	go func() {
+		var apiErr *shared.ApiError
+		config, apiErr = api.Client.GetDefaultPlanConfig()
+		if apiErr != nil {
+			errCh <- fmt.Errorf("error getting plan config: %v", apiErr.Msg)
+			return
+		}
+		errCh <- nil
+	}()
 
-		} else {
-			term.OutputErrorAndExit("Error creating plan: %v", apiErr.Msg)
+	for i := 0; i < 2; i++ {
+		err := <-errCh
+		if err != nil {
+			term.OutputErrorAndExit("Error: %v", err)
 		}
 	}
 
-	err := lib.WriteCurrentPlan(res.Id)
+	err := lib.WriteCurrentPlan(planId)
 
 	if err != nil {
 		term.OutputErrorAndExit("Error setting current plan: %v", err)
+	}
+
+	err = lib.WriteCurrentBranch("main")
+	if err != nil {
+		term.OutputErrorAndExit("Error setting current branch: %v", err)
 	}
 
 	if name == "" {
 		name = "draft"
 	}
 
+	term.StopSpinner()
+
 	fmt.Printf("✅ Started new plan %s and set it to current plan\n", color.New(color.Bold, term.ColorHiGreen).Sprint(name))
+	fmt.Printf("⚙️  Using default config\n")
+
+	resolveAutoMode(config)
+
+	resolveModelPack()
+
+	// autoModeLabel := shared.ConfigSettingsByKey["automode"].KeyToLabel(string(config.AutoMode))
+	// fmt.Println("⚡️ Auto-mode:", autoModeLabel)
+
+	if config.AutoLoadContext {
+		fmt.Println("📥 Automatic context loading is enabled")
+
+		baseDir := contextBaseDir
+		if baseDir == "" {
+			baseDir = "."
+		}
+
+		lib.MustLoadContext([]string{baseDir}, &types.LoadContextParams{
+			DefsOnly:          true,
+			SkipIgnoreWarning: true,
+			AutoLoaded:        true,
+		})
+	} else {
+		fmt.Println()
+	}
+
+	var cmds []string
+	if term.IsRepl {
+		cmds = []string{"config", "plans", "cd", "models"}
+	} else {
+		cmds = []string{"tell", "chat", "config"}
+	}
+
+	if !config.AutoLoadContext {
+		cmds = append([]string{"load"}, cmds...)
+	}
 
 	fmt.Println()
-	term.PrintCmds("", "load", "tell", "chat", "plans", "current")
-
+	term.PrintCmds("", cmds...)
 }

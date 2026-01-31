@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"plandex-server/notify"
+	"runtime/debug"
 	"time"
 
+	shared "plandex-shared"
+
 	"github.com/lib/pq"
-	"github.com/plandex/plandex/shared"
 )
 
 const modelStreamHeartbeatInterval = 1 * time.Second
@@ -38,6 +41,14 @@ func StoreModelStream(stream *ModelStream, ctx context.Context, cancelFn context
 
 	// Start a goroutine to keep the lock alive
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in StoreModelStream: %v\n%s", r, debug.Stack())
+				cancelFn()
+				go notify.NotifyErr(notify.SeverityError, fmt.Errorf("panic in StoreModelStream: %v\n%s", r, debug.Stack()))
+			}
+		}()
+
 		numErrors := 0
 		for {
 			select {

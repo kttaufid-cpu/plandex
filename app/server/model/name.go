@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"plandex-server/db"
-	"plandex-server/hooks"
 	"plandex-server/model/prompts"
 	"plandex-server/types"
+	"plandex-server/utils"
 
-	"github.com/plandex/plandex/shared"
+	shared "plandex-shared"
+
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -18,412 +18,306 @@ func GenPlanName(
 	auth *types.ServerAuth,
 	plan *db.Plan,
 	settings *shared.PlanSettings,
-	client *openai.Client,
+	orgUserConfig *shared.OrgUserConfig,
+	clients map[string]ClientInfo,
+	authVars map[string]string,
 	planContent string,
+	sessionId string,
 	ctx context.Context,
 ) (string, error) {
-	config := settings.ModelPack.Namer
-	content := prompts.GetPlanNamePrompt(planContent)
+	config := settings.GetModelPack().Namer
 
-	contentTokens, err := shared.GetNumTokens(content)
+	var tools []openai.Tool
+	var toolChoice *openai.ToolChoice
 
-	if err != nil {
-		return "", fmt.Errorf("error getting num tokens for content: %v", err)
+	baseModelConfig := config.GetBaseModelConfig(authVars, settings, orgUserConfig)
+
+	var sysPrompt string
+	if baseModelConfig.PreferredOutputFormat == shared.ModelOutputFormatXml {
+		sysPrompt = prompts.SysPlanNameXml
+	} else {
+		sysPrompt = prompts.SysPlanName
+		tools = []openai.Tool{
+			{
+				Type:     "function",
+				Function: &prompts.PlanNameFn,
+			},
+		}
+		choice := openai.ToolChoice{
+			Type: "function",
+			Function: openai.ToolFunction{
+				Name: prompts.PlanNameFn.Name,
+			},
+		}
+		toolChoice = &choice
 	}
 
-	numTokens := prompts.ExtraTokensPerRequest + prompts.ExtraTokensPerMessage + contentTokens
+	prompt := prompts.GetPlanNamePrompt(sysPrompt, planContent)
 
-	messages := []openai.ChatCompletionMessage{
+	messages := []types.ExtendedChatMessage{
 		{
-			Role:    openai.ChatMessageRoleSystem,
-			Content: content,
-		},
-	}
-
-	var responseFormat *openai.ChatCompletionResponseFormat
-	if config.BaseModelConfig.HasJsonResponseMode {
-		responseFormat = &openai.ChatCompletionResponseFormat{Type: "json_object"}
-	}
-
-	_, apiErr := hooks.ExecHook(hooks.WillSendModelRequest, hooks.HookParams{
-		Auth: auth,
-		Plan: plan,
-		WillSendModelRequestParams: &hooks.WillSendModelRequestParams{
-			InputTokens:  numTokens,
-			OutputTokens: shared.AvailableModelsByName[config.BaseModelConfig.ModelName].DefaultReservedOutputTokens,
-			ModelName:    config.BaseModelConfig.ModelName,
-		},
-	})
-	if apiErr != nil {
-		return "", err
-	}
-
-	resp, err := CreateChatCompletionWithRetries(
-		client,
-		ctx,
-		openai.ChatCompletionRequest{
-			Model: config.BaseModelConfig.ModelName,
-			Tools: []openai.Tool{
+			Role: openai.ChatMessageRoleSystem,
+			Content: []types.ExtendedChatMessagePart{
 				{
-					Type:     "function",
-					Function: &prompts.PlanNameFn,
+					Type: openai.ChatMessagePartTypeText,
+					Text: prompt,
 				},
 			},
-			ToolChoice: openai.ToolChoice{
-				Type: "function",
-				Function: openai.ToolFunction{
-					Name: prompts.PlanNameFn.Name,
-				},
-			},
-			Temperature:    config.Temperature,
-			TopP:           config.TopP,
-			Messages:       messages,
-			ResponseFormat: responseFormat,
 		},
-	)
+	}
 
-	var res string
-	var nameRes prompts.PlanNameRes
+	modelRes, err := ModelRequest(ctx, ModelRequestParams{
+		Clients:       clients,
+		AuthVars:      authVars,
+		Auth:          auth,
+		Plan:          plan,
+		ModelConfig:   &config,
+		OrgUserConfig: orgUserConfig,
+		Purpose:       "Plan name",
+		Messages:      messages,
+		Tools:         tools,
+		ToolChoice:    toolChoice,
+		SessionId:     sessionId,
+		Settings:      settings,
+	})
 
 	if err != nil {
 		fmt.Printf("Error during plan name model call: %v\n", err)
 		return "", err
 	}
 
-	for _, choice := range resp.Choices {
-		if len(choice.Message.ToolCalls) == 1 &&
-			choice.Message.ToolCalls[0].Function.Name == prompts.PlanNameFn.Name {
-			fnCall := choice.Message.ToolCalls[0].Function
-			res = fnCall.Arguments
-			break
-		}
-	}
+	var planName string
+	content := modelRes.Content
 
-	var inputTokens int
-	var outputTokens int
-	if resp.Usage.CompletionTokens > 0 {
-		inputTokens = resp.Usage.PromptTokens
-		outputTokens = resp.Usage.CompletionTokens
+	if baseModelConfig.PreferredOutputFormat == shared.ModelOutputFormatXml {
+		planName = utils.GetXMLContent(content, "planName")
+		if planName == "" {
+			return "", fmt.Errorf("No planName tag found in XML response")
+		}
 	} else {
-		inputTokens = numTokens
-		outputTokens, err = shared.GetNumTokens(res)
-
-		if err != nil {
-			return "", fmt.Errorf("error getting num tokens for content: %v", err)
+		if content == "" {
+			fmt.Println("no namePlan function call found in response")
+			return "", fmt.Errorf("No namePlan function call found in response. The model failed to generate a valid response.")
 		}
+
+		var nameRes prompts.PlanNameRes
+		err = json.Unmarshal([]byte(content), &nameRes)
+		if err != nil {
+			fmt.Printf("Error unmarshalling plan description response: %v\n", err)
+			return "", err
+		}
+		planName = nameRes.PlanName
 	}
 
-	_, apiErr = hooks.ExecHook(hooks.DidSendModelRequest, hooks.HookParams{
-		Auth: auth,
-		Plan: plan,
-		DidSendModelRequestParams: &hooks.DidSendModelRequestParams{
-			InputTokens:   inputTokens,
-			OutputTokens:  outputTokens,
-			ModelName:     config.BaseModelConfig.ModelName,
-			ModelProvider: config.BaseModelConfig.Provider,
-			ModelPackName: settings.ModelPack.Name,
-			ModelRole:     shared.ModelRolePlanSummary,
-			Purpose:       "Generated plan name",
-		},
-	})
+	return planName, nil
+}
 
-	if res == "" {
-		fmt.Println("no namePlan function call found in response")
-		return "", fmt.Errorf("No namePlan function call found in response. This usually means the model failed to generate a valid response.")
-	}
-
-	bytes := []byte(res)
-
-	err = json.Unmarshal(bytes, &nameRes)
-	if err != nil {
-		fmt.Printf("Error unmarshalling plan description response: %v\n", err)
-		return "", err
-	}
-
-	return nameRes.PlanName, nil
-
+type GenPipedDataNameParams struct {
+	Ctx           context.Context
+	Auth          *types.ServerAuth
+	Plan          *db.Plan
+	Settings      *shared.PlanSettings
+	OrgUserConfig *shared.OrgUserConfig
+	AuthVars      map[string]string
+	SessionId     string
+	Clients       map[string]ClientInfo
+	PipedContent  string
 }
 
 func GenPipedDataName(
-	auth *types.ServerAuth,
-	plan *db.Plan,
-	settings *shared.PlanSettings,
-	client *openai.Client,
-	pipedContent string,
+	params GenPipedDataNameParams,
 ) (string, error) {
-	config := settings.ModelPack.Namer
+	ctx := params.Ctx
+	auth := params.Auth
+	plan := params.Plan
+	settings := params.Settings
+	clients := params.Clients
+	authVars := params.AuthVars
+	pipedContent := params.PipedContent
+	sessionId := params.SessionId
+	orgUserConfig := params.OrgUserConfig
 
-	content := prompts.GetPipedDataNamePrompt(pipedContent)
+	config := settings.GetModelPack().Namer
 
-	contentTokens, err := shared.GetNumTokens(content)
+	var sysPrompt string
+	var tools []openai.Tool
+	var toolChoice *openai.ToolChoice
 
-	if err != nil {
-		return "", fmt.Errorf("error getting num tokens for content: %v", err)
+	baseModelConfig := config.GetBaseModelConfig(authVars, settings, orgUserConfig)
+
+	if baseModelConfig.PreferredOutputFormat == shared.ModelOutputFormatXml {
+		sysPrompt = prompts.SysPipedDataNameXml
+	} else {
+		sysPrompt = prompts.SysPipedDataName
+		tools = []openai.Tool{
+			{
+				Type:     "function",
+				Function: &prompts.PipedDataNameFn,
+			},
+		}
+		choice := openai.ToolChoice{
+			Type: "function",
+			Function: openai.ToolFunction{
+				Name: prompts.PipedDataNameFn.Name,
+			},
+		}
+		toolChoice = &choice
 	}
 
-	messages := []openai.ChatCompletionMessage{
+	prompt := prompts.GetPipedDataNamePrompt(sysPrompt, pipedContent)
+
+	messages := []types.ExtendedChatMessage{
 		{
-			Role:    openai.ChatMessageRoleSystem,
-			Content: content,
-		},
-	}
-
-	numTokens := prompts.ExtraTokensPerRequest + prompts.ExtraTokensPerMessage + contentTokens
-
-	var responseFormat *openai.ChatCompletionResponseFormat
-	if config.BaseModelConfig.HasJsonResponseMode {
-		responseFormat = &openai.ChatCompletionResponseFormat{Type: "json_object"}
-	}
-
-	_, apiErr := hooks.ExecHook(hooks.WillSendModelRequest, hooks.HookParams{
-		Auth: auth,
-		Plan: plan,
-		WillSendModelRequestParams: &hooks.WillSendModelRequestParams{
-			InputTokens:  numTokens,
-			OutputTokens: shared.AvailableModelsByName[config.BaseModelConfig.ModelName].DefaultReservedOutputTokens,
-			ModelName:    config.BaseModelConfig.ModelName,
-		},
-	})
-	if apiErr != nil {
-		return "", err
-	}
-
-	log.Println("calling piped data name model")
-	// log.Printf("model: %s\n", config.BaseModelConfig.ModelName)
-	// log.Printf("temperature: %f\n", config.Temperature)
-	// log.Printf("topP: %f\n", config.TopP)
-
-	// log.Printf("messages: %v\n", messages)
-	// log.Println(spew.Sdump(messages))
-
-	resp, err := CreateChatCompletionWithRetries(
-		client,
-		context.Background(),
-		openai.ChatCompletionRequest{
-			Model: config.BaseModelConfig.ModelName,
-			Tools: []openai.Tool{
+			Role: openai.ChatMessageRoleSystem,
+			Content: []types.ExtendedChatMessagePart{
 				{
-					Type:     "function",
-					Function: &prompts.PipedDataNameFn,
+					Type: openai.ChatMessagePartTypeText,
+					Text: prompt,
 				},
 			},
-			ToolChoice: openai.ToolChoice{
-				Type: "function",
-				Function: openai.ToolFunction{
-					Name: prompts.PipedDataNameFn.Name,
-				},
-			},
-			Temperature:    config.Temperature,
-			TopP:           config.TopP,
-			Messages:       messages,
-			ResponseFormat: responseFormat,
 		},
-	)
+	}
 
-	var res string
-	var nameRes prompts.PipedDataNameRes
+	modelRes, err := ModelRequest(ctx, ModelRequestParams{
+		Clients:       clients,
+		Auth:          auth,
+		AuthVars:      authVars,
+		Plan:          plan,
+		ModelConfig:   &config,
+		Purpose:       "Piped data name",
+		Messages:      messages,
+		Tools:         tools,
+		ToolChoice:    toolChoice,
+		SessionId:     sessionId,
+		Settings:      settings,
+		OrgUserConfig: orgUserConfig,
+	})
 
 	if err != nil {
 		fmt.Printf("Error during piped data name model call: %v\n", err)
 		return "", err
 	}
 
-	for _, choice := range resp.Choices {
-		if len(choice.Message.ToolCalls) == 1 &&
-			choice.Message.ToolCalls[0].Function.Name == prompts.PipedDataNameFn.Name {
-			fnCall := choice.Message.ToolCalls[0].Function
-			res = fnCall.Arguments
-			break
-		}
-	}
+	var name string
+	content := modelRes.Content
 
-	var inputTokens int
-	var outputTokens int
-	if resp.Usage.CompletionTokens > 0 {
-		inputTokens = resp.Usage.PromptTokens
-		outputTokens = resp.Usage.CompletionTokens
+	if baseModelConfig.PreferredOutputFormat == shared.ModelOutputFormatXml {
+		name = utils.GetXMLContent(content, "name")
+		if name == "" {
+			return "", fmt.Errorf("No name tag found in XML response")
+		}
 	} else {
-		inputTokens = numTokens
-		outputTokens, err = shared.GetNumTokens(res)
-
-		if err != nil {
-			return "", fmt.Errorf("error getting num tokens for content: %v", err)
+		if content == "" {
+			fmt.Println("no namePipedData function call found in response")
+			return "", fmt.Errorf("No namePipedData function call found in response. The model failed to generate a valid response.")
 		}
+
+		var nameRes prompts.PipedDataNameRes
+		err = json.Unmarshal([]byte(content), &nameRes)
+		if err != nil {
+			fmt.Printf("Error unmarshalling piped data name response: %v\n", err)
+			return "", err
+		}
+		name = nameRes.Name
 	}
 
-	_, apiErr = hooks.ExecHook(hooks.DidSendModelRequest, hooks.HookParams{
-		Auth: auth,
-		Plan: plan,
-		DidSendModelRequestParams: &hooks.DidSendModelRequestParams{
-			InputTokens:   inputTokens,
-			OutputTokens:  outputTokens,
-			ModelName:     config.BaseModelConfig.ModelName,
-			ModelProvider: config.BaseModelConfig.Provider,
-			ModelPackName: settings.ModelPack.Name,
-			ModelRole:     shared.ModelRolePlanSummary,
-			Purpose:       "Generated name for data piped into context",
-		},
-	})
-
-	if apiErr != nil {
-		return "", fmt.Errorf("error executing hook: %v", apiErr)
-	}
-
-	if res == "" {
-		fmt.Println("no namePipedData function call found in response")
-		return "", fmt.Errorf("No namePipedData function call found in response. This usually means the model failed to generate a valid response.")
-	}
-
-	bytes := []byte(res)
-
-	err = json.Unmarshal(bytes, &nameRes)
-	if err != nil {
-		fmt.Printf("Error unmarshalling piped data name response: %v\n", err)
-		return "", err
-	}
-
-	return nameRes.Name, nil
-
+	return name, nil
 }
 
 func GenNoteName(
+	ctx context.Context,
 	auth *types.ServerAuth,
 	plan *db.Plan,
 	settings *shared.PlanSettings,
-	client *openai.Client,
+	orgUserConfig *shared.OrgUserConfig,
+	clients map[string]ClientInfo,
+	authVars map[string]string,
 	note string,
+	sessionId string,
 ) (string, error) {
-	config := settings.ModelPack.Namer
+	config := settings.GetModelPack().Namer
 
-	content := prompts.GetNoteNamePrompt(note)
+	var sysPrompt string
+	var tools []openai.Tool
+	var toolChoice *openai.ToolChoice
 
-	contentTokens, err := shared.GetNumTokens(content)
+	baseModelConfig := config.GetBaseModelConfig(authVars, settings, orgUserConfig)
 
-	if err != nil {
-		return "", fmt.Errorf("error getting num tokens for content: %v", err)
-	}
-
-	numTokens := prompts.ExtraTokensPerRequest + prompts.ExtraTokensPerMessage + contentTokens
-
-	messages := []openai.ChatCompletionMessage{
-		{
-			Role:    openai.ChatMessageRoleSystem,
-			Content: content,
-		},
-	}
-
-	var responseFormat *openai.ChatCompletionResponseFormat
-	if config.BaseModelConfig.HasJsonResponseMode {
-		responseFormat = &openai.ChatCompletionResponseFormat{Type: "json_object"}
-	}
-
-	_, apiErr := hooks.ExecHook(hooks.WillSendModelRequest, hooks.HookParams{
-		Auth: auth,
-		Plan: plan,
-		WillSendModelRequestParams: &hooks.WillSendModelRequestParams{
-			InputTokens:  numTokens,
-			OutputTokens: shared.AvailableModelsByName[config.BaseModelConfig.ModelName].DefaultReservedOutputTokens,
-			ModelName:    config.BaseModelConfig.ModelName,
-		},
-	})
-	if apiErr != nil {
-		return "", err
-	}
-
-	log.Println("calling piped data name model")
-	// log.Printf("model: %s\n", config.BaseModelConfig.ModelName)
-	// log.Printf("temperature: %f\n", config.Temperature)
-	// log.Printf("topP: %f\n", config.TopP)
-
-	// log.Printf("messages: %v\n", messages)
-	// log.Println(spew.Sdump(messages))
-
-	resp, err := CreateChatCompletionWithRetries(
-		client,
-		context.Background(),
-		openai.ChatCompletionRequest{
-			Model: config.BaseModelConfig.ModelName,
-			Tools: []openai.Tool{
-				{
-					Type:     "function",
-					Function: &prompts.NoteNameFn,
-				},
-			},
-			ToolChoice: openai.ToolChoice{
-				Type: "function",
-				Function: openai.ToolFunction{
-					Name: prompts.NoteNameFn.Name,
-				},
-			},
-			Temperature:    config.Temperature,
-			TopP:           config.TopP,
-			Messages:       messages,
-			ResponseFormat: responseFormat,
-		},
-	)
-
-	var res string
-	var nameRes prompts.NoteNameRes
-
-	if err != nil {
-		fmt.Printf("Error during piped data name model call: %v\n", err)
-		return "", err
-	}
-
-	for _, choice := range resp.Choices {
-		if len(choice.Message.ToolCalls) == 1 &&
-			choice.Message.ToolCalls[0].Function.Name == prompts.NoteNameFn.Name {
-			fnCall := choice.Message.ToolCalls[0].Function
-			res = fnCall.Arguments
-			break
-		}
-	}
-
-	var inputTokens int
-	var outputTokens int
-	if resp.Usage.CompletionTokens > 0 {
-		inputTokens = resp.Usage.PromptTokens
-		outputTokens = resp.Usage.CompletionTokens
+	if baseModelConfig.PreferredOutputFormat == shared.ModelOutputFormatXml {
+		sysPrompt = prompts.SysNoteNameXml
 	} else {
-		inputTokens = numTokens
-		outputTokens, err = shared.GetNumTokens(res)
-
-		if err != nil {
-			return "", fmt.Errorf("error getting num tokens for content: %v", err)
+		sysPrompt = prompts.SysNoteName
+		tools = []openai.Tool{
+			{
+				Type:     "function",
+				Function: &prompts.NoteNameFn,
+			},
 		}
+		choice := openai.ToolChoice{
+			Type: "function",
+			Function: openai.ToolFunction{
+				Name: prompts.NoteNameFn.Name,
+			},
+		}
+		toolChoice = &choice
 	}
 
-	_, apiErr = hooks.ExecHook(hooks.DidSendModelRequest, hooks.HookParams{
-		Auth: auth,
-		Plan: plan,
-		DidSendModelRequestParams: &hooks.DidSendModelRequestParams{
-			InputTokens:   inputTokens,
-			OutputTokens:  outputTokens,
-			ModelName:     config.BaseModelConfig.ModelName,
-			ModelProvider: config.BaseModelConfig.Provider,
-			ModelPackName: settings.ModelPack.Name,
-			ModelRole:     shared.ModelRolePlanSummary,
-			Purpose:       "Generated name for note added to context",
+	prompt := prompts.GetNoteNamePrompt(sysPrompt, note)
+
+	messages := []types.ExtendedChatMessage{
+		{
+			Role: openai.ChatMessageRoleSystem,
+			Content: []types.ExtendedChatMessagePart{
+				{
+					Type: openai.ChatMessagePartTypeText,
+					Text: prompt,
+				},
+			},
 		},
+	}
+
+	modelRes, err := ModelRequest(ctx, ModelRequestParams{
+		Clients:       clients,
+		Auth:          auth,
+		AuthVars:      authVars,
+		Plan:          plan,
+		ModelConfig:   &config,
+		Purpose:       "Note name",
+		Messages:      messages,
+		Tools:         tools,
+		ToolChoice:    toolChoice,
+		SessionId:     sessionId,
+		Settings:      settings,
+		OrgUserConfig: orgUserConfig,
 	})
 
-	if apiErr != nil {
-		return "", fmt.Errorf("error executing hook: %v", apiErr)
-	}
-
-	if res == "" {
-		fmt.Println("no nameNote function call found in response")
-		return "", fmt.Errorf("No nameNote function call found in response. This usually means the model failed to generate a valid response.")
-	}
-
-	bytes := []byte(res)
-
-	err = json.Unmarshal(bytes, &nameRes)
 	if err != nil {
-		fmt.Printf("Error unmarshalling piped data name response: %v\n", err)
+		fmt.Printf("Error during note name model call: %v\n", err)
 		return "", err
 	}
 
-	return nameRes.Name, nil
+	var name string
+	content := modelRes.Content
 
+	if baseModelConfig.PreferredOutputFormat == shared.ModelOutputFormatXml {
+		name = utils.GetXMLContent(content, "name")
+		if name == "" {
+			return "", fmt.Errorf("No name tag found in XML response")
+		}
+	} else {
+		if content == "" {
+			fmt.Println("no nameNote function call found in response")
+			return "", fmt.Errorf("No nameNote function call found in response. The model failed to generate a valid response.")
+		}
+
+		var nameRes prompts.NoteNameRes
+		err = json.Unmarshal([]byte(content), &nameRes)
+		if err != nil {
+			fmt.Printf("Error unmarshalling note name response: %v\n", err)
+			return "", err
+		}
+		name = nameRes.Name
+	}
+
+	return name, nil
 }

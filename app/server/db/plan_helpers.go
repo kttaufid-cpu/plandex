@@ -1,84 +1,94 @@
 package db
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"strconv"
 	"time"
+
+	shared "plandex-shared"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
-	"github.com/plandex/plandex/shared"
 	"github.com/sashabaranov/go-openai"
 )
 
-func CreatePlan(orgId, projectId, userId, name string) (*Plan, error) {
-	// start a transaction
-	tx, err := Conn.Beginx()
-	if err != nil {
-		return nil, fmt.Errorf("error starting transaction: %v", err)
-	}
+func CreatePlan(ctx context.Context, orgId, projectId, userId, name string) (*Plan, error) {
+	var plan *Plan
+	err := WithTx(ctx, "create plan", func(tx *sqlx.Tx) error {
 
-	// Ensure that rollback is attempted in case of failure
-	defer func() {
+		planConfig, err := GetDefaultPlanConfig(userId)
+
 		if err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil {
-				log.Printf("transaction rollback error: %v\n", rbErr)
-			} else {
-				log.Println("transaction rolled back")
-			}
+			return fmt.Errorf("error getting default plan config: %v", err)
 		}
-	}()
 
-	query := `INSERT INTO plans (org_id, owner_id, project_id, name) 
-	VALUES ($1, $2, $3, $4)
+		query := `INSERT INTO plans (org_id, owner_id, project_id, name, plan_config) 
+	VALUES ($1, $2, $3, $4, $5)
 	RETURNING id, created_at, updated_at`
 
-	plan := &Plan{
-		OrgId:     orgId,
-		OwnerId:   userId,
-		ProjectId: projectId,
-		Name:      name,
-	}
+		plan = &Plan{
+			OrgId:      orgId,
+			OwnerId:    userId,
+			ProjectId:  projectId,
+			Name:       name,
+			PlanConfig: planConfig,
+		}
 
-	err = tx.QueryRow(
-		query,
-		orgId,
-		userId,
-		projectId,
-		name,
-	).Scan(
-		&plan.Id,
-		&plan.CreatedAt,
-		&plan.UpdatedAt,
-	)
+		err = tx.QueryRow(
+			query,
+			orgId,
+			userId,
+			projectId,
+			name,
+			planConfig,
+		).Scan(
+			&plan.Id,
+			&plan.CreatedAt,
+			&plan.UpdatedAt,
+		)
+
+		if err != nil {
+			return fmt.Errorf("error creating plan: %v", err)
+		}
+
+		_, err = tx.Exec("INSERT INTO lockable_plan_ids (plan_id) VALUES ($1)", plan.Id)
+
+		if err != nil {
+			return fmt.Errorf("error inserting lockable plan id: %v", err)
+		}
+
+		// the one place where we do this to skip the locking queue
+		// ok to cheat this once since we're creating a new plan
+		repo := getGitRepo(orgId, plan.Id)
+		_, err = CreateBranch(repo, plan, nil, "main", tx)
+
+		if err != nil {
+			return fmt.Errorf("error creating main branch: %v", err)
+		}
+
+		log.Println("Created branch main")
+
+		err = InitPlan(orgId, plan.Id)
+
+		if err != nil {
+			return fmt.Errorf("error initializing plan dir: %v", err)
+		}
+
+		log.Println("Initialized plan dir")
+
+		return nil
+	})
 
 	if err != nil {
-		return nil, fmt.Errorf("error creating plan: %v", err)
-	}
-
-	_, err = CreateBranch(plan, nil, "main", tx)
-
-	if err != nil {
-		return nil, fmt.Errorf("error creating main branch: %v", err)
-	}
-
-	log.Println("Created branch main")
-
-	err = InitPlan(orgId, plan.Id)
-
-	if err != nil {
-		return nil, fmt.Errorf("error initializing plan dir: %v", err)
-	}
-
-	log.Println("Initialized plan dir")
-
-	// commit the transaction
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("error committing transaction: %v", err)
+		return nil, err
 	}
 
 	return plan, nil
@@ -106,6 +116,21 @@ func ListOwnedPlans(projectIds []string, userId string, archived bool) ([]*Plan,
 	return plans, nil
 }
 
+func GetPlanNamesById(planIds []string) (map[string]string, error) {
+	var plans []*Plan
+	err := Conn.Select(&plans, "SELECT id, name FROM plans WHERE id = ANY($1)", pq.Array(planIds))
+	if err != nil {
+		return nil, fmt.Errorf("error getting plan names: %v", err)
+	}
+
+	namesMap := make(map[string]string)
+	for _, plan := range plans {
+		namesMap[plan.Id] = plan.Name
+	}
+
+	return namesMap, nil
+}
+
 func AddPlanContextTokens(planId, branch string, addTokens int) error {
 	_, err := Conn.Exec("UPDATE branches SET context_tokens = context_tokens + $1 WHERE plan_id = $2 AND name = $3", addTokens, planId, branch)
 	if err != nil {
@@ -115,9 +140,17 @@ func AddPlanContextTokens(planId, branch string, addTokens int) error {
 }
 
 func AddPlanConvoMessage(msg *ConvoMessage, branch string) error {
-	errCh := make(chan error)
+	errCh := make(chan error, 2)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in AddPlanConvoMessage: %v\n%s", r, debug.Stack())
+				errCh <- fmt.Errorf("panic in AddPlanConvoMessage: %v\n%s", r, debug.Stack())
+				runtime.Goexit() // don't allow outer function to continue and double-send to channel
+			}
+		}()
+
 		_, err := Conn.Exec("UPDATE branches SET convo_tokens = convo_tokens + $1 WHERE plan_id = $2 AND name = $3", msg.Tokens, msg.PlanId, branch)
 
 		if err != nil {
@@ -129,6 +162,14 @@ func AddPlanConvoMessage(msg *ConvoMessage, branch string) error {
 	}()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in AddPlanConvoMessage: %v\n%s", r, debug.Stack())
+				errCh <- fmt.Errorf("panic in AddPlanConvoMessage: %v\n%s", r, debug.Stack())
+				runtime.Goexit() // don't allow outer function to continue and double-send to channel
+			}
+		}()
+
 		if msg.Role != openai.ChatMessageRoleAssistant {
 			errCh <- nil
 			return
@@ -154,15 +195,29 @@ func AddPlanConvoMessage(msg *ConvoMessage, branch string) error {
 func SyncPlanTokens(orgId, planId, branch string) error {
 	var contexts []*Context
 	var convos []*ConvoMessage
-	errCh := make(chan error)
+	errCh := make(chan error, 2)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in SyncPlanTokens: %v\n%s", r, debug.Stack())
+				errCh <- fmt.Errorf("panic in SyncPlanTokens: %v\n%s", r, debug.Stack())
+				runtime.Goexit() // don't allow outer function to continue and double-send to channel
+			}
+		}()
 		var err error
-		contexts, err = GetPlanContexts(orgId, planId, false)
+		contexts, err = GetPlanContexts(orgId, planId, false, false)
 		errCh <- err
 	}()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in SyncPlanTokens: %v\n%s", r, debug.Stack())
+				errCh <- fmt.Errorf("panic in SyncPlanTokens: %v\n%s", r, debug.Stack())
+				runtime.Goexit() // don't allow outer function to continue and double-send to channel
+			}
+		}()
 		var err error
 		convos, err = GetPlanConvo(orgId, planId)
 		errCh <- err
@@ -260,6 +315,17 @@ func StoreDescription(description *ConvoMessageDescription) error {
 		return fmt.Errorf("error creating convo message descriptions dir: %v", err)
 	}
 
+	for _, op := range description.Operations {
+		if op.Content != "" {
+			quoted := strconv.Quote(op.Content)
+			op.Content = quoted[1 : len(quoted)-1]
+		}
+		if op.Description != "" {
+			quoted := strconv.Quote(op.Description)
+			op.Description = quoted[1 : len(quoted)-1]
+		}
+	}
+
 	now := time.Now()
 
 	if description.Id == "" {
@@ -303,9 +369,16 @@ func DeleteDraftPlans(orgId, projectId, userId string) error {
 		ids = append(ids, id)
 	}
 
-	errCh := make(chan error)
+	errCh := make(chan error, len(ids))
 	for _, planId := range ids {
 		go func(planId string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in DeleteDraftPlans: %v\n%s", r, debug.Stack())
+					errCh <- fmt.Errorf("panic in DeleteDraftPlans: %v\n%s", r, debug.Stack())
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
 			errCh <- DeletePlanDir(orgId, planId)
 		}(planId)
 	}
@@ -344,9 +417,16 @@ func DeleteOwnerPlans(orgId, projectId, userId string) error {
 		ids = append(ids, id)
 	}
 
-	errCh := make(chan error)
+	errCh := make(chan error, len(ids))
 	for _, planId := range ids {
 		go func(planId string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in DeleteOwnerPlans: %v\n%s", r, debug.Stack())
+					errCh <- fmt.Errorf("panic in DeleteOwnerPlans: %v\n%s", r, debug.Stack())
+					runtime.Goexit() // don't allow outer function to continue and double-send to channel
+				}
+			}()
 			errCh <- DeletePlanDir(orgId, planId)
 		}(planId)
 	}
@@ -412,4 +492,13 @@ func BumpPlanUpdatedAt(planId string, t time.Time) error {
 	}
 
 	return nil
+}
+
+func GetPlanIdsForProject(projectId string) ([]string, error) {
+	var ids []string
+	err := Conn.Select(&ids, "SELECT id FROM plans WHERE project_id = $1", projectId)
+	if err != nil {
+		return nil, fmt.Errorf("error getting plan ids for project: %v", err)
+	}
+	return ids, nil
 }

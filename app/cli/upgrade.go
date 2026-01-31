@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,10 +13,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"plandex/term"
-	"plandex/version"
+	"plandex-cli/term"
+	"plandex-cli/version"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/Masterminds/semver"
 	"github.com/fatih/color"
@@ -33,8 +35,15 @@ func checkForUpgrade() {
 
 	term.StartSpinner("")
 	defer term.StopSpinner()
-	latestVersionURL := "https://plandex.ai/cli-version.txt"
-	resp, err := http.Get(latestVersionURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	latestVersionURL := "https://plandex.ai/v2/cli-version.txt"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, latestVersionURL, nil)
+	if err != nil {
+		log.Println("Error creating request:", err)
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Println("Error checking latest version:", err)
 		return

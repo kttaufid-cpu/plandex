@@ -3,12 +3,12 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"plandex/api"
-	"plandex/auth"
-	"plandex/lib"
-	"plandex/stream"
-	streamtui "plandex/stream_tui"
-	"plandex/term"
+	"plandex-cli/api"
+	"plandex-cli/auth"
+	"plandex-cli/lib"
+	"plandex-cli/stream"
+	streamtui "plandex-cli/stream_tui"
+	"plandex-cli/term"
 
 	"github.com/spf13/cobra"
 )
@@ -50,7 +50,7 @@ func connect(cmd *cobra.Command, args []string) {
 	}
 
 	go func() {
-		err := streamtui.StartStreamUI("", false)
+		err := streamtui.StartStreamUI("", false, true)
 
 		if err != nil {
 			term.OutputErrorAndExit("Error starting stream UI", err)

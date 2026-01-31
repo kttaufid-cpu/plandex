@@ -1,11 +1,13 @@
 package cmd
 
 import (
-	"plandex/auth"
-	"plandex/term"
+	"plandex-cli/auth"
+	"plandex-cli/term"
 
 	"github.com/spf13/cobra"
 )
+
+var pin string
 
 var signInCmd = &cobra.Command{
 	Use:   "sign-in",
@@ -17,17 +19,12 @@ var signInCmd = &cobra.Command{
 func init() {
 	RootCmd.AddCommand(signInCmd)
 
-	signInCmd.Flags().String("code", "", "Sign in code from the Plandex web UI")
+	signInCmd.Flags().StringVar(&pin, "pin", "", "Sign in with a pin from the Plandex Cloud web UI")
 }
 
 func signIn(cmd *cobra.Command, args []string) {
-	code, err := cmd.Flags().GetString("code")
-	if err != nil {
-		term.OutputErrorAndExit("Error getting code: %v", err)
-	}
-
-	if code != "" {
-		err = auth.SignInWithCode(code, "")
+	if pin != "" {
+		err := auth.SignInWithCode(pin, "")
 
 		if err != nil {
 			term.OutputErrorAndExit("Error signing in: %v", err)
@@ -36,7 +33,7 @@ func signIn(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	err = auth.SelectOrSignInOrCreate()
+	err := auth.SelectOrSignInOrCreate()
 
 	if err != nil {
 		term.OutputErrorAndExit("Error signing in: %v", err)

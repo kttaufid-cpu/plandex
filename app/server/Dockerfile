@@ -1,8 +1,17 @@
-FROM --platform=linux/amd64 golang:1.23.3
+FROM golang:1.23.3
 
 # Update and install necessary packages including build tools for Tree-sitter
 RUN apt-get update && \
-  apt-get install -y git gcc g++ make
+  apt-get install -y git gcc g++ make python3 python3-venv
+
+# Install Python and create a virtual environment for litellm passthrough
+RUN python3 -m venv /opt/venv
+    
+# Activate the virtual environment for all following RUN commands
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Now install litellm passthrough dependencies in the virtual environment
+RUN pip install --no-cache-dir "litellm==1.72.6" "fastapi==0.115.12" "uvicorn==0.34.1" "google-cloud-aiplatform==1.96.0" "boto3==1.38.40" "botocore==1.38.40"
 
 WORKDIR /app
 
@@ -21,16 +30,12 @@ COPY ./scripts /scripts
 # Set working directory to server
 WORKDIR /app/server
 
-# Set environment variables for Go
-ENV GOOS=linux
-ENV GOARCH=amd64
-
 # Build the application
 RUN rm -f plandex-server && go build -o plandex-server .
 
 # Set the port and expose it
-ENV PORT=8080
-EXPOSE 8080
+ENV PORT=8099
+EXPOSE 8099
 
 # Command to run the executable
 CMD ["./plandex-server"]

@@ -10,10 +10,11 @@ import (
 	"plandex-server/db"
 	"plandex-server/host"
 	"plandex-server/model/plan"
+	"plandex-server/notify"
+	"plandex-server/shutdown"
+	"runtime/debug"
 	"syscall"
 	"time"
-
-	"github.com/rs/cors"
 )
 
 func MustLoadIp() {
@@ -46,10 +47,29 @@ func RegisterShutdownHook(hook func()) {
 	shutdownHooks = append(shutdownHooks, hook)
 }
 
-func StartServer(handler http.Handler) {
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip logging for monitoring endpoints
+		if r.URL.Path == "/health" || r.URL.Path == "/version" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		start := time.Now()
+
+		log.Printf("\n\nRequest: %s %s\n\n", r.Method, r.URL.Path)
+		next.ServeHTTP(w, r)
+		log.Printf("\n\nCompleted: %s %s in %v\n\n", r.Method, r.URL.Path, time.Since(start))
+	})
+}
+
+func StartServer(handler http.Handler, configureFn func(handler http.Handler) http.Handler, afterStart func()) {
 	if os.Getenv("GOENV") == "development" {
 		log.Println("In development mode.")
 	}
+
+	shutdown.ShutdownCtx, shutdown.ShutdownCancel = context.WithCancel(context.Background())
+	defer shutdown.ShutdownCancel()
 
 	// Ensure database connection is closed
 	defer func() {
@@ -61,30 +81,20 @@ func StartServer(handler http.Handler) {
 		log.Println("Database connection closed")
 	}()
 
-	// Get externalPort from the environment variable or default to 8080
+	// Get externalPort from the environment variable or default to 8099
 	externalPort := os.Getenv("PORT")
 	if externalPort == "" {
-		externalPort = "8080"
+		externalPort = "8099"
 	}
 
-	// Apply the maxBytesMiddleware to limit request size to 100 MB
-	handler = maxBytesMiddleware(handler, 100<<20) // 100 MB limit
+	// Add logging middleware before the maxBytes middleware
+	handler = loggingMiddleware(handler)
 
-	// Enable CORS based on environment
-	if os.Getenv("GOENV") == "development" {
-		handler = cors.New(cors.Options{
-			AllowedOrigins:   []string{"*"},
-			AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-			AllowedHeaders:   []string{"Content-Type", "Authorization"},
-			AllowCredentials: true,
-		}).Handler(handler)
-	} else {
-		handler = cors.New(cors.Options{
-			AllowedOrigins:   []string{fmt.Sprintf("https://%s.plandex.ai", os.Getenv("APP_SUBDOMAIN"))},
-			AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-			AllowedHeaders:   []string{"Content-Type", "Authorization"},
-			AllowCredentials: true,
-		}).Handler(handler)
+	// Apply the maxBytesMiddleware to limit request size to 1 GB
+	handler = maxBytesMiddleware(handler, 1000<<20) // 1 GB limit
+
+	if configureFn != nil {
+		handler = configureFn(handler)
 	}
 
 	server := &http.Server{
@@ -102,52 +112,92 @@ func StartServer(handler http.Handler) {
 
 	log.Println("Started Plandex server on port " + externalPort)
 
-	// Capture SIGTERM and SIGINT signals
-	sigTermChan := make(chan os.Signal, 1)
-	signal.Notify(sigTermChan, syscall.SIGTERM, syscall.SIGINT)
-
-	<-sigTermChan
-	log.Println("Plandex server shutting down gracefully...")
-
-	// Context with a 5-second timeout to allow ongoing requests to finish
-	// wait for active plans to finish for up to 2 hours
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Hour)
-	defer cancel()
-
-	// Wait for active plans to complete or timeout
-	log.Println("Waiting for any active plans to complete...")
-	select {
-	case <-ctx.Done():
-		log.Println("Timeout waiting for active plans. Forcing shutdown.")
-	case <-waitForActivePlans():
-		log.Println("All active plans finished.")
+	if afterStart != nil {
+		afterStart()
 	}
 
+	// Capture SIGTERM and SIGINT signals
+	sigTermChan := make(chan os.Signal, 1)
+
+	signal.Notify(sigTermChan, syscall.SIGTERM, syscall.SIGINT)
+
+	sig := <-sigTermChan
+	log.Printf("Received signal %v, shutting down gracefully...\n", sig)
+
+	// Create a channel to track completion of active plans
+	plansDone := make(chan struct{})
+
+	// Start goroutine to monitor active plans
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in waitForActivePlans: %v\n%s", r, debug.Stack())
+				go notify.NotifyErr(notify.SeverityError, fmt.Errorf("panic in waitForActivePlans: %v\n%s", r, debug.Stack()))
+			}
+			close(plansDone)
+		}()
+
+		// First wait for active plans to complete or timeout
+		log.Println("Waiting for active plans to complete...")
+		activePlansCtx, cancel := context.WithTimeout(shutdown.ShutdownCtx, 60*time.Second)
+		defer cancel()
+
+		select {
+		case <-activePlansCtx.Done():
+			if activePlansCtx.Err() == context.DeadlineExceeded {
+				log.Println("Timeout waiting for active plans. Forcing shutdown.")
+			}
+		case <-waitForActivePlans():
+			log.Println("All active plans finished.")
+		}
+
+		// Then clean up any remaining locks
+		log.Println("Cleaning up any remaining locks...")
+		if err := db.CleanupActiveLocks(shutdown.ShutdownCtx); err != nil {
+			log.Printf("Error cleaning up locks: %v", err)
+		}
+	}()
+
+	// Wait for plans to finish or timeout
+	select {
+	case <-shutdown.ShutdownCtx.Done():
+		log.Println("Global shutdown timeout reached")
+	case <-plansDone:
+		log.Println("All cleanup tasks completed")
+	}
+
+	// Shutdown the HTTP server
 	log.Println("Shutting down http server...")
-	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	httpCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := server.Shutdown(ctx); err != nil {
+
+	if err := server.Shutdown(httpCtx); err != nil {
 		log.Printf("Http server forced to shutdown: %v", err)
 	}
 
 	// Execute shutdown hooks
+	log.Println("Executing shutdown hooks...")
 	for _, hook := range shutdownHooks {
 		hook()
 	}
 
 	log.Println("Shutdown complete")
-	os.Exit(0)
 }
 
 func waitForActivePlans() chan struct{} {
 	done := make(chan struct{})
 	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
 		for {
-			if plan.NumActivePlans() == 0 {
-				close(done)
-				return
+			select {
+			case <-ticker.C:
+				if plan.NumActivePlans() == 0 {
+					close(done)
+					return
+				}
 			}
-			time.Sleep(1 * time.Second)
 		}
 	}()
 	return done
@@ -155,6 +205,9 @@ func waitForActivePlans() chan struct{} {
 
 func maxBytesMiddleware(next http.Handler, maxBytes int64) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// log the size of the request body
+		// log.Printf("Request body size: %d", r.ContentLength)
+
 		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 		next.ServeHTTP(w, r)
 	})

@@ -1,9 +1,10 @@
 package syntax
 
 import (
-	"path/filepath"
 	"strings"
 	"time"
+
+	shared "plandex-shared"
 
 	tree_sitter "github.com/smacker/go-tree-sitter"
 
@@ -14,21 +15,26 @@ import (
 const parserTimeout = 500 * time.Millisecond
 
 type ValidationRes = struct {
-	Ext       string
-	Lang      string
-	HasParser bool
-	TimedOut  bool
-	Valid     bool
-	Errors    []string
+	Lang     shared.Language
+	Parser   *tree_sitter.Parser
+	TimedOut bool
+	Valid    bool
+	Errors   []string
 }
 
-func Validate(ctx context.Context, path, file string) (*ValidationRes, error) {
-	ext := filepath.Ext(path)
-
-	parser, lang, fallbackParser, fallbackLang := GetParserForExt(ext)
+func ValidateFile(ctx context.Context, path string, file string) (*ValidationRes, error) {
+	parser, lang, fallbackParser, fallbackLang := GetParserForPath(path)
 
 	if parser == nil {
-		return &ValidationRes{Ext: ext, Lang: lang, HasParser: false}, nil
+		return &ValidationRes{Lang: lang, Parser: nil}, nil
+	}
+
+	return ValidateWithParsers(ctx, lang, parser, fallbackLang, fallbackParser, file)
+}
+
+func ValidateWithParsers(ctx context.Context, lang shared.Language, parser *tree_sitter.Parser, fallbackLang shared.Language, fallbackParser *tree_sitter.Parser, file string) (*ValidationRes, error) {
+	if file == "" {
+		return &ValidationRes{Lang: lang, Parser: parser, Valid: true}, nil
 	}
 
 	// Set a timeout duration for the parsing operations
@@ -39,6 +45,10 @@ func Validate(ctx context.Context, path, file string) (*ValidationRes, error) {
 	tree, err := parser.ParseCtx(ctx, nil, []byte(file))
 
 	if err != nil || tree == nil {
+		if err != nil && err.Error() == "operation limit was hit" {
+			return &ValidationRes{Lang: lang, Parser: parser, TimedOut: true}, nil
+		}
+
 		return nil, fmt.Errorf("failed to parse the content: %v", err)
 	}
 	defer tree.Close()
@@ -52,7 +62,7 @@ func Validate(ctx context.Context, path, file string) (*ValidationRes, error) {
 			if err != nil || fallbackTree == nil {
 
 				if err != nil && strings.Contains(err.Error(), "timeout") {
-					return &ValidationRes{Ext: ext, Lang: lang, HasParser: true, TimedOut: true}, nil
+					return &ValidationRes{Lang: lang, Parser: parser, TimedOut: true}, nil
 				}
 
 				return nil, fmt.Errorf("failed to parse the content with fallback parser: %v", err)
@@ -62,26 +72,29 @@ func Validate(ctx context.Context, path, file string) (*ValidationRes, error) {
 			root = fallbackTree.RootNode()
 
 			if !root.HasError() {
-				return &ValidationRes{Ext: ext, Lang: fallbackLang, HasParser: true, Valid: true}, nil
+				return &ValidationRes{Lang: fallbackLang, Parser: fallbackParser, Valid: true}, nil
 			}
 		}
 
 		errorMarkers := insertErrorMarkers(file, root)
 
 		return &ValidationRes{
-			Ext:       ext,
-			Lang:      lang,
-			HasParser: true,
-			Valid:     false,
-			Errors:    errorMarkers,
+			Lang:   lang,
+			Parser: parser,
+			Valid:  false,
+			Errors: errorMarkers,
 		}, nil
 
 	}
 
-	return &ValidationRes{Ext: ext, Lang: lang, HasParser: true, Valid: true}, nil
+	return &ValidationRes{Lang: lang, Parser: parser, Valid: true}, nil
 }
 
 func insertErrorMarkers(source string, node *tree_sitter.Node) []string {
+	if source == "" {
+		return []string{}
+	}
+
 	var markers []string
 	var uniqueMarkers = map[string]bool{}
 

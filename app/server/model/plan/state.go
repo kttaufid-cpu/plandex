@@ -2,13 +2,16 @@ package plan
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"plandex-server/db"
+	"plandex-server/notify"
+	"plandex-server/shutdown"
 	"plandex-server/types"
 	"strings"
 	"time"
 
-	"github.com/plandex/plandex/shared"
+	shared "plandex-shared"
 )
 
 var (
@@ -19,8 +22,8 @@ func GetActivePlan(planId, branch string) *types.ActivePlan {
 	return activePlans.Get(strings.Join([]string{planId, branch}, "|"))
 }
 
-func CreateActivePlan(orgId, userId, planId, branch, prompt string, buildOnly bool) *types.ActivePlan {
-	activePlan := types.NewActivePlan(orgId, userId, planId, branch, prompt, buildOnly)
+func CreateActivePlan(orgId, userId, planId, branch, prompt string, buildOnly, autoContext bool, sessionId string) *types.ActivePlan {
+	activePlan := types.NewActivePlan(orgId, userId, planId, branch, prompt, buildOnly, autoContext, sessionId)
 	key := strings.Join([]string{planId, branch}, "|")
 
 	activePlans.Set(key, activePlan)
@@ -51,8 +54,15 @@ func CreateActivePlan(orgId, userId, planId, branch, prompt string, buildOnly bo
 						log.Printf("Error setting plan %s status to ready: %v\n", planId, err)
 					}
 
+					// cancel *after* the DeleteActivePlan call
+					// allows queued operations to complete
+					DeleteActivePlan(orgId, userId, planId, branch)
+					activePlan.CancelFn()
+					return
 				} else {
 					log.Printf("Error streaming plan %s: %v\n", planId, apiErr)
+
+					go notify.NotifyErr(notify.SeverityError, fmt.Errorf("error streaming plan %s: %v", planId, apiErr))
 
 					err := db.SetPlanStatus(planId, branch, shared.PlanStatusError, apiErr.Msg)
 					if err != nil {
@@ -64,16 +74,21 @@ func CreateActivePlan(orgId, userId, planId, branch, prompt string, buildOnly bo
 						Type:  shared.StreamMessageError,
 						Error: apiErr,
 					})
+					activePlan.FlushStreamBuffer()
 
 					log.Println("Stopping any active summary stream")
 					activePlan.SummaryCancelFn()
 
-					time.Sleep(50 * time.Millisecond)
-				}
+					log.Println("Waiting 100ms after streaming error before canceling active plan")
+					time.Sleep(100 * time.Millisecond)
 
-				activePlan.CancelFn()
-				DeleteActivePlan(orgId, userId, planId, branch)
-				return
+					// cancel *before* the DeleteActivePlan call below
+					// short circuits any active operations
+					log.Println("Cancelling active plan")
+					activePlan.CancelFn()
+					DeleteActivePlan(orgId, userId, planId, branch)
+					return
+				}
 			}
 		}
 	}()
@@ -82,50 +97,62 @@ func CreateActivePlan(orgId, userId, planId, branch, prompt string, buildOnly bo
 }
 
 func DeleteActivePlan(orgId, userId, planId, branch string) {
-	ctx, cancelFn := context.WithCancel(context.Background())
+	log.Printf("Deleting active plan %s - %s - %s\n", planId, branch, orgId)
 
-	repoLockId, err := db.LockRepo(
-		db.LockRepoParams{
-			UserId:   userId,
-			OrgId:    orgId,
-			PlanId:   planId,
-			Branch:   branch,
-			Scope:    db.LockScopeWrite,
-			Ctx:      ctx,
-			CancelFn: cancelFn,
-		},
-	)
+	activePlan := GetActivePlan(planId, branch)
+	if activePlan == nil {
+		log.Printf("DeleteActivePlan - No active plan found for plan ID %s on branch %s\n", planId, branch)
+		return
+	}
+
+	ctx, cancelFn := context.WithTimeout(shutdown.ShutdownCtx, 10*time.Second)
+	defer cancelFn()
+
+	log.Printf("Clearing uncommitted changes for plan %s - %s - %s\n", planId, branch, orgId)
+
+	err := db.ExecRepoOperation(db.ExecRepoOperationParams{
+		OrgId:    orgId,
+		UserId:   userId,
+		PlanId:   planId,
+		Branch:   branch,
+		Scope:    db.LockScopeWrite,
+		Ctx:      ctx,
+		CancelFn: cancelFn,
+		Reason:   "delete active plan",
+	}, func(repo *db.GitRepo) error {
+		log.Printf("Starting clear uncommitted changes for plan %s - %s - %s\n", planId, branch, orgId)
+		err := repo.GitClearUncommittedChanges(branch)
+		log.Printf("Finished clear uncommitted changes for plan %s - %s - %s\n", planId, branch, orgId)
+		log.Printf("Error: %v\n", err)
+		return err
+	})
 
 	if err != nil {
-		log.Printf("Error locking repo for plan %s: %v\n", planId, err)
-	} else {
-
-		defer func() {
-			err := db.DeleteRepoLock(repoLockId)
-			if err != nil {
-				log.Printf("Error unlocking repo for plan %s: %v\n", planId, err)
-			}
-		}()
-
-		err := db.GitClearUncommittedChanges(orgId, planId)
-		if err != nil {
-			log.Printf("Error clearing uncommitted changes for plan %s: %v\n", planId, err)
-		}
+		log.Printf("Error clearing uncommitted changes for plan %s: %v\n", planId, err)
 	}
 
 	activePlans.Delete(strings.Join([]string{planId, branch}, "|"))
+
+	log.Printf("Deleted active plan %s - %s - %s\n", planId, branch, orgId)
 }
 
 func UpdateActivePlan(planId, branch string, fn func(*types.ActivePlan)) {
 	activePlans.Update(strings.Join([]string{planId, branch}, "|"), fn)
 }
 
-func SubscribePlan(planId, branch string) (string, chan string) {
+func SubscribePlan(ctx context.Context, planId, branch string) (string, chan string) {
 	log.Printf("Subscribing to plan %s\n", planId)
 	var id string
 	var ch chan string
+
+	activePlan := GetActivePlan(planId, branch)
+	if activePlan == nil {
+		log.Printf("SubscribePlan - No active plan found for plan ID %s on branch %s\n", planId, branch)
+		return "", nil
+	}
+
 	UpdateActivePlan(planId, branch, func(activePlan *types.ActivePlan) {
-		id, ch = activePlan.Subscribe()
+		id, ch = activePlan.Subscribe(ctx)
 	})
 	return id, ch
 }

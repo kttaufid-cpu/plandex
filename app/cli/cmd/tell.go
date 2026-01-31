@@ -6,25 +6,19 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"plandex/auth"
-	"plandex/lib"
-	"plandex/plan_exec"
-	"plandex/term"
+	"plandex-cli/auth"
+	"plandex-cli/lib"
+	"plandex-cli/plan_exec"
+	"plandex-cli/term"
+	"plandex-cli/types"
 	"strings"
 
-	"github.com/plandex/plandex/shared"
+	shared "plandex-shared"
+
 	"github.com/spf13/cobra"
 )
 
-const defaultEditor = "vim"
-
-// const defaultEditor = "nano"
-
-var tellPromptFile string
-var tellBg bool
-var tellStop bool
-var tellNoBuild bool
-var tellAutoApply bool
+var isImplementationOfChat bool
 
 // tellCmd represents the prompt command
 var tellCmd = &cobra.Command{
@@ -39,50 +33,69 @@ var tellCmd = &cobra.Command{
 func init() {
 	RootCmd.AddCommand(tellCmd)
 
-	tellCmd.Flags().StringVarP(&tellPromptFile, "file", "f", "", "File containing prompt")
-	tellCmd.Flags().BoolVarP(&tellStop, "stop", "s", false, "Stop after a single reply")
-	tellCmd.Flags().BoolVarP(&tellNoBuild, "no-build", "n", false, "Don't build files")
-	tellCmd.Flags().BoolVar(&tellBg, "bg", false, "Execute autonomously in the background")
+	initExecFlags(tellCmd, initExecFlagsParams{})
 
-	tellCmd.Flags().BoolVarP(&autoConfirm, "yes", "y", false, "Automatically confirm context updates")
-	tellCmd.Flags().BoolVar(&tellAutoApply, "apply", false, "Automatically apply changes (and confirm context updates)")
-	tellCmd.Flags().BoolVarP(&autoCommit, "commit", "c", false, "Commit changes to git when --apply/-a is passed")
-
+	tellCmd.Flags().BoolVar(&isImplementationOfChat, "from-chat", false, "Begin implementation based on conversation so far")
 }
 
 func doTell(cmd *cobra.Command, args []string) {
-	validateTellFlags()
-
 	auth.MustResolveAuthWithOrg()
 	lib.MustResolveProject()
+	mustSetPlanExecFlags(cmd, false)
 
-	if lib.CurrentPlanId == "" {
-		term.OutputNoCurrentPlanErrorAndExit()
+	if isImplementationOfChat && len(args) > 0 {
+		term.OutputErrorAndExit("Error: --from-chat cannot be used with a prompt")
 	}
 
-	var apiKeys map[string]string
-	if !auth.Current.IntegratedModelsMode {
-		apiKeys = lib.MustVerifyApiKeys()
+	var prompt string
+	if !isImplementationOfChat {
+		prompt = getTellPrompt(args)
+
+		if prompt == "" {
+			fmt.Println("🤷‍♂️ No prompt to send")
+			return
+		}
 	}
 
-	prompt := getTellPrompt(args)
-
-	if prompt == "" {
-		fmt.Println("🤷‍♂️ No prompt to send")
-		return
+	tellFlags := types.TellFlags{
+		TellBg:                 tellBg,
+		TellStop:               tellStop,
+		TellNoBuild:            tellNoBuild,
+		AutoContext:            tellAutoContext,
+		SmartContext:           tellSmartContext,
+		ExecEnabled:            !noExec,
+		AutoApply:              tellAutoApply,
+		IsImplementationOfChat: isImplementationOfChat,
+		SkipChangesMenu:        tellSkipMenu,
 	}
 
 	plan_exec.TellPlan(plan_exec.ExecParams{
 		CurrentPlanId: lib.CurrentPlanId,
 		CurrentBranch: lib.CurrentBranch,
-		ApiKeys:       apiKeys,
-		CheckOutdatedContext: func(maybeContexts []*shared.Context) (bool, bool, error) {
-			return lib.CheckOutdatedContextWithOutput(false, autoConfirm || tellAutoApply, maybeContexts)
+		AuthVars:      lib.MustVerifyAuthVars(auth.Current.IntegratedModelsMode),
+		CheckOutdatedContext: func(maybeContexts []*shared.Context, projectPaths *types.ProjectPaths) (bool, bool, error) {
+			auto := autoConfirm || tellAutoApply || tellAutoContext
+			return lib.CheckOutdatedContextWithOutput(auto, auto, maybeContexts, projectPaths)
 		},
-	}, prompt, tellBg, tellStop, tellNoBuild, false, false, false)
+	}, prompt, tellFlags)
 
 	if tellAutoApply {
-		lib.MustApplyPlan(lib.CurrentPlanId, lib.CurrentBranch, true, autoCommit, !autoCommit)
+		applyFlags := types.ApplyFlags{
+			AutoConfirm: true,
+			AutoCommit:  autoCommit,
+			NoCommit:    !autoCommit,
+			NoExec:      noExec,
+			AutoExec:    autoExec || autoDebug > 0,
+			AutoDebug:   autoDebug,
+		}
+
+		lib.MustApplyPlan(lib.ApplyPlanParams{
+			PlanId:     lib.CurrentPlanId,
+			Branch:     lib.CurrentBranch,
+			ApplyFlags: applyFlags,
+			TellFlags:  tellFlags,
+			OnExecFail: plan_exec.GetOnApplyExecFail(applyFlags, tellFlags),
+		})
 	}
 }
 
@@ -139,25 +152,25 @@ func prepareEditorCommand(editor string, filename string) *exec.Cmd {
 	}
 }
 
-func getEditorInstructions(editor string) string {
-	return "👉  Write your prompt below, then save and exit to send it to Plandex.\n• To save and exit, press ESC, then type :wq! and press ENTER.\n• To exit without saving, press ESC, then type :q! and press ENTER.\n\n\n"
+func getEditorInstructions() string {
+	if editor == EditorTypeVim {
+		return "👉  Write your prompt below, then save and exit to send it to Plandex.\n• To save and exit, press ESC, then type :wq! and press ENTER.\n• To exit without saving, press ESC, then type :q! and press ENTER.\n\n\n"
+	}
+
+	if editor == EditorTypeNano {
+		return "👉  Write your prompt below, then save and exit to send it to Plandex.\n• To save and exit, press Ctrl+X, then Y, then ENTER.\n• To exit without saving, press Ctrl+X, then N.\n\n\n"
+	}
+
+	return "👉  Write your prompt below, then save and exit to send it to Plandex.\n\n\n"
 }
 
 func getEditorPrompt() string {
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = os.Getenv("VISUAL")
-		if editor == "" {
-			editor = defaultEditor
-		}
-	}
-
 	tempFile, err := os.CreateTemp(os.TempDir(), "plandex_prompt_*")
 	if err != nil {
 		term.OutputErrorAndExit("Failed to create temporary file: %v", err)
 	}
 
-	instructions := getEditorInstructions(editor)
+	instructions := getEditorInstructions()
 	filename := tempFile.Name()
 	err = os.WriteFile(filename, []byte(instructions), 0644)
 	if err != nil {
@@ -192,14 +205,50 @@ func getEditorPrompt() string {
 
 }
 
-func validateTellFlags() {
-	if tellAutoApply && tellNoBuild {
-		term.OutputErrorAndExit("🚨 --apply/-a can't be used with --no-build/-n")
-	}
-	if tellAutoApply && tellBg {
-		term.OutputErrorAndExit("🚨 --apply/-a can't be used with --bg")
-	}
-	if autoCommit && !tellAutoApply {
-		term.OutputErrorAndExit("🚨 --commit/-c can only be used with --apply/-a")
-	}
-}
+// func maybeShowDiffs() {
+// 	diffs, err := api.Client.GetPlanDiffs(lib.CurrentPlanId, lib.CurrentBranch, plainTextOutput || showDiffUi)
+// 	if err != nil {
+// 		term.OutputErrorAndExit("Error getting plan diffs: %v", err)
+// 		return
+// 	}
+
+// 	if len(diffs) > 0 {
+// 		cmd := exec.Command(os.Args[0], "diffs", "--ui")
+
+// 		// Create a context that's cancelled when the program exits
+// 		ctx, cancel := context.WithCancel(context.Background())
+
+// 		// Ensure cleanup on program exit
+// 		go func() {
+// 			// Wait for program exit signal
+// 			c := make(chan os.Signal, 1)
+// 			signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+// 			<-c
+
+// 			// Cancel context and kill the process
+// 			cancel()
+// 			if cmd.Process != nil {
+// 				cmd.Process.Kill()
+// 			}
+// 		}()
+
+// 		go func() {
+// 			if err := cmd.Start(); err != nil {
+// 				fmt.Fprintf(os.Stderr, "Error starting diffs command: %v\n", err)
+// 				return
+// 			}
+
+// 			// Wait in a separate goroutine
+// 			go cmd.Wait()
+
+// 			// Wait for either context cancellation or process completion
+// 			<-ctx.Done()
+// 			if cmd.Process != nil {
+// 				cmd.Process.Kill()
+// 			}
+// 		}()
+
+// 		// Give the UI a moment to start
+// 		time.Sleep(100 * time.Millisecond)
+// 	}
+// }

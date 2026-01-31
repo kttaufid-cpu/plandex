@@ -1,7 +1,10 @@
 package types
 
 import (
-	"github.com/plandex/plandex/shared"
+	"context"
+	shared "plandex-shared"
+
+	"github.com/shopspring/decimal"
 )
 
 type OnStreamPlanParams struct {
@@ -27,6 +30,9 @@ type ApiClient interface {
 	GetOrgSession() (*shared.Org, *shared.ApiError)
 	ListOrgs() ([]*shared.Org, *shared.ApiError)
 	CreateOrg(req shared.CreateOrgRequest) (*shared.CreateOrgResponse, *shared.ApiError)
+
+	GetOrgUserConfig() (*shared.OrgUserConfig, *shared.ApiError)
+	UpdateOrgUserConfig(req shared.OrgUserConfig) *shared.ApiError
 
 	ListUsers() (*shared.ListUsersResponse, *shared.ApiError)
 	DeleteUser(userId string) *shared.ApiError
@@ -60,13 +66,14 @@ type ApiClient interface {
 	DeletePlan(planId string) *shared.ApiError
 	DeleteAllPlans(projectId string) *shared.ApiError
 	ConnectPlan(planId, branch string, onStreamPlan OnStreamPlan) *shared.ApiError
-	StopPlan(planId, branch string) *shared.ApiError
+	StopPlan(ctx context.Context, planId, branch string) *shared.ApiError
 
 	ArchivePlan(planId string) *shared.ApiError
 	UnarchivePlan(planId string) *shared.ApiError
 	RenamePlan(planId string, name string) *shared.ApiError
 
 	GetCurrentPlanState(planId, branch string) (*shared.CurrentPlanState, *shared.ApiError)
+	GetCurrentPlanStateAtSha(planId, sha string) (*shared.CurrentPlanState, *shared.ApiError)
 	ApplyPlan(planId, branch string, req shared.ApplyPlanRequest) (string, *shared.ApiError)
 	RejectAllChanges(planId, branch string) *shared.ApiError
 	RejectFile(planId, branch, filePath string) *shared.ApiError
@@ -77,6 +84,7 @@ type ApiClient interface {
 	UpdateContext(planId, branch string, req shared.UpdateContextRequest) (*shared.UpdateContextResponse, *shared.ApiError)
 	DeleteContext(planId, branch string, req shared.DeleteContextRequest) (*shared.DeleteContextResponse, *shared.ApiError)
 	ListContext(planId, branch string) ([]*shared.Context, *shared.ApiError)
+	LoadCachedFileMap(planId, branch string, req shared.LoadCachedFileMapRequest) (*shared.LoadCachedFileMapResponse, *shared.ApiError)
 
 	ListConvo(planId, branch string) ([]*shared.ConvoMessage, *shared.ApiError)
 	GetPlanStatus(planId, branch string) (string, *shared.ApiError)
@@ -93,13 +101,24 @@ type ApiClient interface {
 	GetOrgDefaultSettings() (*shared.PlanSettings, *shared.ApiError)
 	UpdateOrgDefaultSettings(req shared.UpdateSettingsRequest) (*shared.UpdateSettingsResponse, *shared.ApiError)
 
-	CreateCustomModel(model *shared.AvailableModel) *shared.ApiError
-	ListCustomModels() ([]*shared.AvailableModel, *shared.ApiError)
-	DeleteAvailableModel(modelId string) *shared.ApiError
+	GetPlanConfig(planId string) (*shared.PlanConfig, *shared.ApiError)
+	UpdatePlanConfig(planId string, req shared.UpdatePlanConfigRequest) *shared.ApiError
+	GetDefaultPlanConfig() (*shared.PlanConfig, *shared.ApiError)
+	UpdateDefaultPlanConfig(req shared.UpdateDefaultPlanConfigRequest) *shared.ApiError
 
-	CreateModelPack(set *shared.ModelPack) *shared.ApiError
+	CreateCustomModels(input *shared.ModelsInput) *shared.ApiError
+	ListCustomModels() ([]*shared.CustomModel, *shared.ApiError)
+
+	ListCustomProviders() ([]*shared.CustomProvider, *shared.ApiError)
+
 	ListModelPacks() ([]*shared.ModelPack, *shared.ApiError)
-	DeleteModelPack(setId string) *shared.ApiError
 
-	GetCreditsTransactions(pageSize, pageNum int) (*shared.CreditsLogResponse, *shared.ApiError)
+	GetCreditsTransactions(pageSize, pageNum int, req shared.CreditsLogRequest) (*shared.CreditsLogResponse, *shared.ApiError)
+	GetCreditsSummary(req shared.CreditsLogRequest) (*shared.CreditsSummaryResponse, *shared.ApiError)
+	GetBalance() (decimal.Decimal, *shared.ApiError)
+
+	GetFileMap(req shared.GetFileMapRequest) (*shared.GetFileMapResponse, *shared.ApiError)
+	GetContextBody(planId, branch, contextId string) (*shared.GetContextBodyResponse, *shared.ApiError)
+	AutoLoadContext(ctx context.Context, planId, branch string, req shared.LoadContextRequest) (*shared.LoadContextResponse, *shared.ApiError)
+	GetBuildStatus(planId, branch string) (*shared.GetBuildStatusResponse, *shared.ApiError)
 }

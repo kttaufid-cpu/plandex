@@ -1,12 +1,18 @@
 package streamtui
 
 import (
+	"context"
+	"log"
+	"sync"
+	"time"
+
+	shared "plandex-shared"
+
 	bubbleKey "github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/plandex/plandex/shared"
 )
 
 const (
@@ -27,9 +33,12 @@ var missingFileSelectOpts = []string{
 	MissingFileOverwriteLabel,
 }
 
+var stateMu sync.RWMutex
+
 type streamUIModel struct {
-	buildOnly bool
-	keymap    keymap
+	buildOnly   bool
+	canSendToBg bool
+	keymap      keymap
 
 	reply       string
 	mainDisplay string
@@ -40,10 +49,12 @@ type streamUIModel struct {
 	starting     bool
 	spinner      spinner.Model
 	buildSpinner spinner.Model
+	sharedTicker *time.Ticker
 
 	building       bool
 	tokensByPath   map[string]int
 	finishedByPath map[string]bool
+	removedByPath  map[string]bool
 
 	ready  bool
 	width  int
@@ -55,6 +66,7 @@ type streamUIModel struct {
 	missingFilePath        string
 	missingFileSelectedIdx int
 	promptedMissingFile    bool
+	autoLoadedMissingFile  bool
 	missingFileContent     string
 	missingFileTokens      int
 
@@ -66,6 +78,13 @@ type streamUIModel struct {
 
 	err    error
 	apiErr *shared.ApiError
+
+	updateDebouncer *UpdateDebouncer
+
+	autoLoadContextCancelFn context.CancelFunc
+
+	buildViewCollapsed bool
+	userToggledBuild   bool
 }
 
 type keymap = struct {
@@ -79,17 +98,30 @@ type keymap = struct {
 	up,
 	down,
 	quit,
+	background,
 	enter bubbleKey.Binding
 }
 
 func (m streamUIModel) Init() tea.Cmd {
+	log.Println("Model Init start")
 	m.mainViewport.MouseWheelEnabled = true
-
-	// start spinner
-	return m.spinner.Tick
+	return tea.Batch(
+		m.Tick(),
+		m.pollBuildStatus(),
+	)
 }
 
-func initialModel(prestartReply, prompt string, buildOnly bool) *streamUIModel {
+type buildStatusPollMsg time.Time
+
+func (m streamUIModel) pollBuildStatus() tea.Cmd {
+	return tea.Every(5*time.Second, func(t time.Time) tea.Msg {
+		return buildStatusPollMsg(t)
+	})
+}
+
+func initialModel(prestartReply, prompt string, buildOnly bool, canSendToBg bool) *streamUIModel {
+	sharedTicker := time.NewTicker(100 * time.Millisecond)
+
 	s := spinner.New()
 	s.Spinner = spinner.Points
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
@@ -98,13 +130,20 @@ func initialModel(prestartReply, prompt string, buildOnly bool) *streamUIModel {
 	buildSpinner.Spinner = spinner.MiniDot
 
 	initialState := streamUIModel{
-		buildOnly: buildOnly,
-		prompt:    prompt,
-		reply:     prestartReply,
+		buildOnly:          buildOnly,
+		canSendToBg:        canSendToBg,
+		buildViewCollapsed: false,
+		prompt:             prompt,
+		reply:              prestartReply,
 		keymap: keymap{
 			quit: bubbleKey.NewBinding(
-				bubbleKey.WithKeys("b", "ctrl+c"),
+				bubbleKey.WithKeys("ctrl+c"),
 				bubbleKey.WithHelp("ctrl+c", "quit"),
+			),
+
+			background: bubbleKey.NewBinding(
+				bubbleKey.WithKeys("b"),
+				bubbleKey.WithHelp("b", "background"),
 			),
 
 			stop: bubbleKey.NewBinding(
@@ -158,13 +197,42 @@ func initialModel(prestartReply, prompt string, buildOnly bool) *streamUIModel {
 			),
 		},
 
-		tokensByPath:   make(map[string]int),
-		finishedByPath: make(map[string]bool),
-		spinner:        s,
-		buildSpinner:   buildSpinner,
-		atScrollBottom: true,
-		starting:       true,
+		tokensByPath:    make(map[string]int),
+		finishedByPath:  make(map[string]bool),
+		removedByPath:   make(map[string]bool),
+		spinner:         s,
+		buildSpinner:    buildSpinner,
+		sharedTicker:    sharedTicker,
+		atScrollBottom:  true,
+		starting:        true,
+		updateDebouncer: NewUpdateDebouncer(8 * time.Millisecond),
 	}
 
 	return &initialState
+}
+
+func (m streamUIModel) Tick() tea.Cmd {
+	return func() tea.Msg {
+		<-m.sharedTicker.C
+		return spinner.TickMsg{}
+	}
+}
+
+func (m *streamUIModel) cleanup() {
+	log.Println("Cleaning up stream UI model")
+	m.updateState(func() {
+		m.sharedTicker.Stop()
+	})
+}
+
+func (m *streamUIModel) readState() streamUIModel {
+	stateMu.RLock()
+	defer stateMu.RUnlock()
+	return *m
+}
+
+func (m *streamUIModel) updateState(updateFn func()) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	updateFn()
 }

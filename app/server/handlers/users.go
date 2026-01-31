@@ -2,17 +2,31 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"plandex-server/db"
 	"strings"
 
+	shared "plandex-shared"
+
 	"github.com/gorilla/mux"
-	"github.com/plandex/plandex/shared"
+	"github.com/jmoiron/sqlx"
 )
 
 func ListUsersHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("Received a request for ListUsersHandler")
+
+	if os.Getenv("GOENV") == "development" && os.Getenv("LOCAL_MODE") == "1" {
+		writeApiError(w, shared.ApiError{
+			Type:   shared.ApiErrorTypeOther,
+			Status: http.StatusForbidden,
+			Msg:    "Local mode is not supported for user management",
+		})
+		return
+	}
+
 	auth := Authenticate(w, r, true)
 	if auth == nil {
 		return
@@ -78,6 +92,16 @@ func ListUsersHandler(w http.ResponseWriter, r *http.Request) {
 
 func DeleteOrgUserHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("Received a request for DeleteOrgUserHandler")
+
+	if os.Getenv("GOENV") == "development" && os.Getenv("LOCAL_MODE") == "1" {
+		writeApiError(w, shared.ApiError{
+			Type:   shared.ApiErrorTypeOther,
+			Status: http.StatusForbidden,
+			Msg:    "Local mode is not supported for user management",
+		})
+		return
+	}
+
 	auth := Authenticate(w, r, true)
 	if auth == nil {
 		return
@@ -161,56 +185,37 @@ func DeleteOrgUserHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// start a transaction
-	tx, err := db.Conn.Beginx()
-	if err != nil {
-		log.Printf("Error starting transaction: %v\n", err)
-		http.Error(w, "Error starting transaction: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+	err = db.WithTx(r.Context(), "delete org user", func(tx *sqlx.Tx) error {
 
-	// Ensure that rollback is attempted in case of failure
-	defer func() {
+		err = db.DeleteOrgUser(auth.OrgId, userId, tx)
+
 		if err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil {
-				log.Printf("transaction rollback error: %v\n", rbErr)
-			} else {
-				log.Println("transaction rolled back")
+			log.Println("Error deleting org user: ", err)
+			return fmt.Errorf("error deleting org user: %v", err)
+		}
+
+		invite, err := db.GetActiveInviteByEmail(auth.OrgId, auth.User.Email)
+
+		if err != nil {
+			log.Println("Error getting invite for org user: ", err)
+			return fmt.Errorf("error getting invite for org user: %v", err)
+		}
+
+		if invite != nil {
+			err = db.DeleteInvite(invite.Id, tx)
+
+			if err != nil {
+				log.Println("Error deleting invite: ", err)
+				return fmt.Errorf("error deleting invite: %v", err)
 			}
 		}
-	}()
 
-	err = db.DeleteOrgUser(auth.OrgId, userId, tx)
+		return nil
+	})
 
 	if err != nil {
 		log.Println("Error deleting org user: ", err)
 		http.Error(w, "Error deleting org user: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	invite, err := db.GetActiveInviteByEmail(auth.OrgId, auth.User.Email)
-
-	if err != nil {
-		log.Println("Error getting invite for org user: ", err)
-		http.Error(w, "Error getting invite for org user: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if invite != nil {
-		err = db.DeleteInvite(invite.Id, tx)
-
-		if err != nil {
-			log.Println("Error deleting invite: ", err)
-			http.Error(w, "Error deleting invite: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-
-	err = tx.Commit()
-
-	if err != nil {
-		log.Println("Error committing transaction: ", err)
-		http.Error(w, "Error committing transaction: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 

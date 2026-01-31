@@ -1,9 +1,6 @@
 package shared
 
 import (
-	"database/sql/driver"
-	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/sashabaranov/go-openai"
@@ -27,12 +24,16 @@ type User struct {
 	Email            string `json:"email"`
 	IsTrial          bool   `json:"isTrial"`
 	NumNonDraftPlans int    `json:"numNonDraftPlans"`
+
+	DefaultPlanConfig *PlanConfig `json:"defaultPlanConfig,omitempty"`
 }
 
 type OrgUser struct {
 	OrgId     string `json:"orgId"`
 	UserId    string `json:"userId"`
 	OrgRoleId string `json:"orgRoleId"`
+
+	Config *OrgUserConfig `json:"config,omitempty"`
 }
 
 type Invite struct {
@@ -53,16 +54,17 @@ type Project struct {
 }
 
 type Plan struct {
-	Id              string     `json:"id"`
-	OwnerId         string     `json:"ownerId"`
-	ProjectId       string     `json:"projectId"`
-	Name            string     `json:"name"`
-	SharedWithOrgAt *time.Time `json:"sharedWithOrgAt,omitempty"`
-	TotalReplies    int        `json:"totalReplies"`
-	ActiveBranches  int        `json:"activeBranches"`
-	ArchivedAt      *time.Time `json:"archivedAt,omitempty"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	UpdatedAt       time.Time  `json:"updatedAt"`
+	Id              string      `json:"id"`
+	OwnerId         string      `json:"ownerId"`
+	ProjectId       string      `json:"projectId"`
+	Name            string      `json:"name"`
+	SharedWithOrgAt *time.Time  `json:"sharedWithOrgAt,omitempty"`
+	TotalReplies    int         `json:"totalReplies"`
+	ActiveBranches  int         `json:"activeBranches"`
+	PlanConfig      *PlanConfig `json:"planConfig,omitempty"`
+	ArchivedAt      *time.Time  `json:"archivedAt,omitempty"`
+	CreatedAt       time.Time   `json:"createdAt"`
+	UpdatedAt       time.Time   `json:"updatedAt"`
 }
 
 type Branch struct {
@@ -89,7 +91,10 @@ const (
 	ContextDirectoryTreeType ContextType = "directory tree"
 	ContextPipedDataType     ContextType = "piped data"
 	ContextImageType         ContextType = "image"
+	ContextMapType           ContextType = "map"
 )
+
+type FileMapBodies map[string]string
 
 type Context struct {
 	Id              string                `json:"id"`
@@ -101,21 +106,74 @@ type Context struct {
 	Sha             string                `json:"sha"`
 	NumTokens       int                   `json:"numTokens"`
 	Body            string                `json:"body,omitempty"`
+	BodySize        int64                 `json:"bodySize,omitempty"`
 	ForceSkipIgnore bool                  `json:"forceSkipIgnore"`
 	ImageDetail     openai.ImageURLDetail `json:"imageDetail,omitempty"`
+	MapParts        FileMapBodies         `json:"mapParts,omitempty"`
+	MapShas         map[string]string     `json:"mapShas,omitempty"`
+	MapTokens       map[string]int        `json:"mapTokens,omitempty"`
+	MapSizes        map[string]int64      `json:"mapSizes,omitempty"`
+	AutoLoaded      bool                  `json:"autoLoaded"`
 	CreatedAt       time.Time             `json:"createdAt"`
 	UpdatedAt       time.Time             `json:"updatedAt"`
 }
 
+type TellStage string
+
+const (
+	TellStagePlanning       TellStage = "planning"
+	TellStageImplementation TellStage = "implementation"
+)
+
+type PlanningPhase string
+
+const (
+	PlanningPhaseContext PlanningPhase = "context"
+	PlanningPhaseTasks   PlanningPhase = "tasks"
+)
+
+type CurrentStage struct {
+	TellStage     TellStage
+	PlanningPhase PlanningPhase
+}
+
+type ConvoMessageFlags struct {
+	DidMakePlan           bool `json:"didMakePlan"`
+	DidRemoveTasks        bool `json:"didRemoveTasks"`
+	DidMakeDebuggingPlan  bool `json:"didMakeDebuggingPlan"`
+	DidLoadContext        bool `json:"didLoadContext"`
+	CurrentStage          CurrentStage
+	IsChat                bool `json:"isChat"`
+	DidWriteCode          bool `json:"didWriteCode"`
+	DidCompleteTask       bool `json:"didCompleteTask"`
+	DidCompletePlan       bool `json:"didCompletePlan"`
+	HasUnfinishedSubtasks bool `json:"hasUnfinishedSubtasks"`
+	IsApplyDebug          bool `json:"isApplyDebug"`
+	IsUserDebug           bool `json:"isUserDebug"`
+	HasError              bool `json:"hasError"`
+}
+
+type Subtask struct {
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	UsesFiles   []string `json:"usesFiles"`
+	IsFinished  bool     `json:"isFinished"`
+}
+
 type ConvoMessage struct {
-	Id        string    `json:"id"`
-	UserId    string    `json:"userId"`
-	Role      string    `json:"role"`
-	Tokens    int       `json:"tokens"`
-	Num       int       `json:"num"`
-	Message   string    `json:"message"`
-	Stopped   bool      `json:"stopped"`
-	CreatedAt time.Time `json:"createdAt"`
+	Id               string            `json:"id"`
+	UserId           string            `json:"userId"`
+	Role             string            `json:"role"`
+	Tokens           int               `json:"tokens"`
+	Num              int               `json:"num"`
+	Message          string            `json:"message"`
+	Stopped          bool              `json:"stopped"`
+	Flags            ConvoMessageFlags `json:"flags"`
+	Subtask          *Subtask          `json:"subtask,omitempty"`
+	AddedSubtasks    []*Subtask        `json:"addedSubtasks,omitempty"`
+	RemovedSubtasks  []string          `json:"removedSubtasks,omitempty"`
+	ActiveContextIds []string          `json:"activeContextIds"`
+	CreatedAt        time.Time         `json:"createdAt"`
 }
 
 type ConvoSummary struct {
@@ -128,13 +186,41 @@ type ConvoSummary struct {
 	CreatedAt                   time.Time `json:"createdAt"`
 }
 
+type OperationType string
+
+const (
+	OperationTypeFile   OperationType = "file"
+	OperationTypeMove   OperationType = "move"
+	OperationTypeRemove OperationType = "remove"
+	OperationTypeReset  OperationType = "reset"
+)
+
+type Operation struct {
+	Type        OperationType
+	Path        string
+	Destination string
+	Content     string
+	Description string
+	ReplyBefore string
+	NumTokens   int
+}
+
+func (o *Operation) Name() string {
+	res := string(o.Type) + " | " + o.Path
+	if o.Destination != "" {
+		res += " → " + o.Destination
+	}
+	return res
+}
+
 type ConvoMessageDescription struct {
-	Id                    string          `json:"id"`
-	ConvoMessageId        string          `json:"convoMessageId"`
-	SummarizedToMessageId string          `json:"summarizedToMessageId"`
-	MadePlan              bool            `json:"madePlan"`
-	CommitMsg             string          `json:"commitMsg"`
-	Files                 []string        `json:"files"`
+	Id                    string `json:"id"`
+	ConvoMessageId        string `json:"convoMessageId"`
+	SummarizedToMessageId string `json:"summarizedToMessageId"`
+	WroteFiles            bool   `json:"wroteFiles"`
+	CommitMsg             string `json:"commitMsg"`
+	// Files                 []string        `json:"files"`
+	Operations            []*Operation    `json:"operations"`
 	DidBuild              bool            `json:"didBuild"`
 	BuildPathsInvalidated map[string]bool `json:"buildPathsInvalidated"`
 	Error                 string          `json:"error"`
@@ -153,25 +239,14 @@ type PlanBuild struct {
 }
 
 type Replacement struct {
-	Id                    string                             `json:"id"`
-	Old                   string                             `json:"old"`
-	Summary               string                             `json:"summary"`
-	EntireFile            bool                               `json:"entireFile"`
-	New                   string                             `json:"new"`
-	Failed                bool                               `json:"failed"`
-	RejectedAt            *time.Time                         `json:"rejectedAt,omitempty"`
-	StreamedChange        *StreamedChangeWithLineNums        `json:"streamedChange"`
-	StreamedChangeUpdated *StreamedChangeWithLineNumsUpdated `json:"streamedChangeUpdated"`
-}
-
-func (r *Replacement) GetSummary() string {
-	if r.Summary != "" {
-		return r.Summary
-	}
-	if r.StreamedChange != nil {
-		return r.StreamedChange.Summary
-	}
-	return ""
+	Id             string                      `json:"id"`
+	Old            string                      `json:"old"`
+	Summary        string                      `json:"summary"`
+	EntireFile     bool                        `json:"entireFile"`
+	New            string                      `json:"new"`
+	Failed         bool                        `json:"failed"`
+	RejectedAt     *time.Time                  `json:"rejectedAt,omitempty"`
+	StreamedChange *StreamedChangeWithLineNums `json:"streamedChange"`
 }
 
 type PlanFileResult struct {
@@ -187,13 +262,7 @@ type PlanFileResult struct {
 	RejectedAt          *time.Time     `json:"rejectedAt,omitempty"`
 	Replacements        []*Replacement `json:"replacements"`
 
-	CanVerify    bool       `json:"canVerify"`
-	RanVerifyAt  *time.Time `json:"ranVerifyAt,omitempty"`
-	VerifyPassed bool       `json:"verifyPassed"`
-
-	IsFix       bool `json:"isFix"`
-	IsSyntaxFix bool `json:"isSyntaxFix"`
-	IsOtherFix  bool `json:"isOtherFix"`
+	RemovedFile bool `json:"removedFile"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
@@ -201,11 +270,11 @@ type PlanFileResult struct {
 
 type CurrentPlanFiles struct {
 	Files           map[string]string    `json:"files"`
+	Removed         map[string]bool      `json:"removedByPath"`
 	UpdatedAtByPath map[string]time.Time `json:"updatedAtByPath"`
 }
 
 type PlanFileResultsByPath map[string][]*PlanFileResult
-
 type PlanResult struct {
 	SortedPaths        []string                  `json:"sortedPaths"`
 	FileResultsByPath  PlanFileResultsByPath     `json:"fileResultsByPath"`
@@ -213,10 +282,21 @@ type PlanResult struct {
 	ReplacementsByPath map[string][]*Replacement `json:"replacementsByPath"`
 }
 
+type PlanApply struct {
+	Id                         string    `json:"id"`
+	UserId                     string    `json:"userId"`
+	ConvoMessageIds            []string  `json:"convoMessageIds"`
+	ConvoMessageDescriptionIds []string  `json:"convoMessageDescriptionIds"`
+	PlanFileResultIds          []string  `json:"planFileResultIds"`
+	CommitMsg                  string    `json:"commitMsg"`
+	CreatedAt                  time.Time `json:"createdAt"`
+}
+
 type CurrentPlanState struct {
 	PlanResult               *PlanResult                `json:"planResult"`
 	CurrentPlanFiles         *CurrentPlanFiles          `json:"currentPlanFiles"`
 	ConvoMessageDescriptions []*ConvoMessageDescription `json:"convoMessageDescriptions"`
+	PlanApplies              []*PlanApply               `json:"planApplies"`
 	ContextsByPath           map[string]*Context        `json:"contextsByPath"`
 }
 
@@ -225,148 +305,6 @@ type OrgRole struct {
 	IsDefault   bool   `json:"isDefault"`
 	Label       string `json:"label"`
 	Description string `json:"description"`
-}
-
-type ModelCompatibility struct {
-	IsOpenAICompatible        bool `json:"isOpenAICompatible"`
-	HasJsonResponseMode       bool `json:"hasJsonMode"`
-	HasStreaming              bool `json:"hasStreaming"`
-	HasFunctionCalling        bool `json:"hasFunctionCalling"`
-	HasStreamingFunctionCalls bool `json:"hasStreamingFunctionCalls"`
-	HasImageSupport           bool `json:"hasImageSupport"`
-}
-
-type BaseModelConfig struct {
-	Provider       ModelProvider `json:"provider"`
-	CustomProvider *string       `json:"customProvider,omitempty"`
-	BaseUrl        string        `json:"baseUrl"`
-	ModelName      string        `json:"modelName"`
-	MaxTokens      int           `json:"maxTokens"`
-	ApiKeyEnvVar   string        `json:"apiKeyEnvVar"`
-	ModelCompatibility
-}
-
-type AvailableModel struct {
-	Id string `json:"id"`
-	BaseModelConfig
-	Description                 string    `json:"description"`
-	DefaultMaxConvoTokens       int       `json:"defaultMaxConvoTokens"`
-	DefaultReservedOutputTokens int       `json:"defaultReservedOutputTokens"`
-	CreatedAt                   time.Time `json:"createdAt"`
-	UpdatedAt                   time.Time `json:"updatedAt"`
-}
-
-type PlannerModelConfig struct {
-	MaxConvoTokens       int `json:"maxConvoTokens"`
-	ReservedOutputTokens int `json:"maxOutputTokens"`
-}
-
-type ModelRoleConfig struct {
-	Role            ModelRole       `json:"role"`
-	BaseModelConfig BaseModelConfig `json:"baseModelConfig"`
-	Temperature     float32         `json:"temperature"`
-	TopP            float32         `json:"topP"`
-}
-
-func (m *ModelRoleConfig) Scan(src interface{}) error {
-	if src == nil {
-		return nil
-	}
-	switch s := src.(type) {
-	case []byte:
-		return json.Unmarshal(s, m)
-	case string:
-		return json.Unmarshal([]byte(s), m)
-	default:
-		return fmt.Errorf("unsupported data type: %T", src)
-	}
-}
-
-func (m ModelRoleConfig) Value() (driver.Value, error) {
-	return json.Marshal(m)
-}
-
-type PlannerRoleConfig struct {
-	ModelRoleConfig
-	PlannerModelConfig
-}
-
-func (p *PlannerRoleConfig) Scan(src interface{}) error {
-	if src == nil {
-		return nil
-	}
-	switch s := src.(type) {
-	case []byte:
-		return json.Unmarshal(s, p)
-	case string:
-		return json.Unmarshal([]byte(s), p)
-	default:
-		return fmt.Errorf("unsupported data type: %T", src)
-	}
-}
-
-func (p PlannerRoleConfig) Value() (driver.Value, error) {
-	return json.Marshal(p)
-}
-
-type ModelPack struct {
-	Id          string            `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Planner     PlannerRoleConfig `json:"planner"`
-	PlanSummary ModelRoleConfig   `json:"planSummary"`
-	Builder     ModelRoleConfig   `json:"builder"`
-	Namer       ModelRoleConfig   `json:"namer"`
-	CommitMsg   ModelRoleConfig   `json:"commitMsg"`
-	ExecStatus  ModelRoleConfig   `json:"execStatus"`
-
-	// optional for backwards compatibility
-	Verifier *ModelRoleConfig `json:"verifier"`
-	AutoFix  *ModelRoleConfig `json:"autoFix"`
-}
-
-func (m *ModelPack) GetVerifier() ModelRoleConfig {
-	if m.Verifier == nil {
-		return m.Builder
-	}
-	return *m.Verifier
-}
-
-func (m *ModelPack) GetAutoFix() ModelRoleConfig {
-	if m.AutoFix == nil {
-		return m.Builder
-	}
-	return *m.AutoFix
-}
-
-type ModelOverrides struct {
-	MaxConvoTokens       *int `json:"maxConvoTokens"`
-	MaxTokens            *int `json:"maxContextTokens"`
-	ReservedOutputTokens *int `json:"maxOutputTokens"`
-}
-
-type PlanSettings struct {
-	ModelOverrides ModelOverrides `json:"modelOverrides"`
-	ModelPack      *ModelPack     `json:"modelPack"`
-	UpdatedAt      time.Time      `json:"updatedAt"`
-}
-
-func (p *PlanSettings) Scan(src interface{}) error {
-	if src == nil {
-		return nil
-	}
-	switch s := src.(type) {
-	case []byte:
-		return json.Unmarshal(s, p)
-	case string:
-		return json.Unmarshal([]byte(s), p)
-	default:
-		return fmt.Errorf("unsupported data type: %T", src)
-	}
-}
-
-func (p PlanSettings) Value() (driver.Value, error) {
-	return json.Marshal(p)
 }
 
 type CloudBillingFields struct {
@@ -382,10 +320,12 @@ type CloudBillingFields struct {
 	ChangedBillingMode bool `json:"changedBillingMode"`
 	TrialPaid          bool `json:"trialPaid"`
 
-	StripeSubscriptionId *string    `json:"stripeSubscriptionId"`
-	SubscriptionStatus   *string    `json:"subscriptionStatus"`
-	SubscriptionPausedAt *time.Time `json:"subscriptionPausedAt"`
-	StripePaymentMethod  *string    `json:"stripePaymentMethod"`
+	StripeSubscriptionId                 *string    `json:"stripeSubscriptionId"`
+	SubscriptionStatus                   *string    `json:"subscriptionStatus"`
+	SubscriptionPausedAt                 *time.Time `json:"subscriptionPausedAt"`
+	StripePaymentMethod                  *string    `json:"stripePaymentMethod"`
+	SubscriptionActionRequired           bool       `json:"subscriptionActionRequired"` // for 3ds/sca approvals
+	SubscriptionActionRequiredInvoiceUrl *string    `json:"subscriptionActionRequiredInvoiceUrl"`
 }
 
 type CreditsTransactionType string
@@ -405,48 +345,56 @@ const (
 	CreditTypeSwitch     CreditType = "switch"
 )
 
-type DebitType string
-
-const (
-	DebitTypeModelInput  DebitType = "model_input"
-	DebitTypeModelOutput DebitType = "model_output"
-)
-
 type CreditsTransaction struct {
-	Id                          string                 `json:"id"`
-	OrgId                       string                 `json:"orgId"`
-	OrgName                     string                 `json:"orgName"`
-	UserId                      *string                `json:"userId"`
-	UserEmail                   *string                `json:"userEmail"`
-	UserName                    *string                `json:"userName"`
-	TransactionType             CreditsTransactionType `json:"transactionType"`
-	Amount                      decimal.Decimal        `json:"amount"`
-	StartBalance                decimal.Decimal        `json:"startBalance"`
-	EndBalance                  decimal.Decimal        `json:"endBalance"`
-	CreditType                  *CreditType            `json:"creditType,omitempty"`
-	CreditIsAutoRebuy           bool                   `json:"creditIsAutoRebuy"`
-	CreditAutoRebuyMinThreshold *decimal.Decimal       `json:"creditAutoRebuyMinThreshold,omitempty"`
-	CreditAutoRebuyToBalance    *decimal.Decimal       `json:"creditAutoRebuyToBalance,omitempty"`
-	CreditSubscriptionId        *string                `json:"creditSubscriptionId,omitempty"`
-	CreditSubscriptionPlanId    *string                `json:"creditSubscriptionPlanId,omitempty"`
-	CreditStripeCustomerId      *string                `json:"creditStripeCustomerId,omitempty"`
-	CreditStripeSubscriptionId  *string                `json:"creditStripeSubscriptionId,omitempty"`
-	CreditStripePriceId         *string                `json:"creditStripePriceId,omitempty"`
-	CreditStripeInvoiceId       *string                `json:"creditStripeInvoiceId,omitempty"`
-	CreditStripePaymentMethod   *string                `json:"creditStripePaymentMethod,omitempty"`
-	DebitType                   *DebitType             `json:"debitType,omitempty"`
-	DebitTokens                 *int                   `json:"debitTokens,omitempty"`
-	DebitBaseAmount             *decimal.Decimal       `json:"debitBaseAmount,omitempty"`
-	DebitSurcharge              *decimal.Decimal       `json:"debitSurcharge,omitempty"`
-	DebitModelProvider          *ModelProvider         `json:"debitModelProvider,omitempty"`
-	DebitModelName              *string                `json:"debitModelName,omitempty"`
-	DebitModelPackName          *string                `json:"debitModelPackName,omitempty"`
-	DebitModelRole              *ModelRole             `json:"debitModelRole,omitempty"`
-	DebitModelPricePerToken     *decimal.Decimal       `json:"debitModelPricePerToken,omitempty"`
-	DebitApiKeyHash             *string                `json:"debitApiKeyHash,omitempty"`
-	DebitPurpose                *string                `json:"debitPurpose,omitempty"`
-	DebitPlanId                 *string                `json:"debitPlanId,omitempty"`
-	DebitPlanName               *string                `json:"debitPlanName,omitempty"`
-	DebitId                     *string                `json:"debitId,omitempty"`
-	CreatedAt                   time.Time              `json:"createdAt"`
+	Id              string                 `json:"id"`
+	OrgId           string                 `json:"orgId"`
+	OrgName         string                 `json:"orgName"`
+	UserId          *string                `json:"userId"`
+	UserEmail       *string                `json:"userEmail"`
+	UserName        *string                `json:"userName"`
+	TransactionType CreditsTransactionType `json:"transactionType"`
+	Amount          decimal.Decimal        `json:"amount"`
+	StartBalance    decimal.Decimal        `json:"startBalance"`
+	EndBalance      decimal.Decimal        `json:"endBalance"`
+
+	CreditType                  *CreditType      `json:"creditType,omitempty"`
+	CreditIsAutoRebuy           bool             `json:"creditIsAutoRebuy"`
+	CreditAutoRebuyMinThreshold *decimal.Decimal `json:"creditAutoRebuyMinThreshold,omitempty"`
+	CreditAutoRebuyToBalance    *decimal.Decimal `json:"creditAutoRebuyToBalance,omitempty"`
+
+	DebitInputTokens              *int             `json:"debitInputTokens,omitempty"`
+	DebitOutputTokens             *int             `json:"debitOutputTokens,omitempty"`
+	DebitModelInputPricePerToken  *decimal.Decimal `json:"debitModelInputPricePerToken,omitempty"`
+	DebitModelOutputPricePerToken *decimal.Decimal `json:"debitModelOutputPricePerToken,omitempty"`
+
+	DebitBaseAmount *decimal.Decimal `json:"debitBaseAmount,omitempty"`
+	DebitSurcharge  *decimal.Decimal `json:"debitSurcharge,omitempty"`
+
+	DebitModelProvider *ModelProvider `json:"debitModelProvider,omitempty"`
+	DebitModelName     *string        `json:"debitModelName,omitempty"`
+	DebitModelPackName *string        `json:"debitModelPackName,omitempty"`
+	DebitModelRole     *ModelRole     `json:"debitModelRole,omitempty"`
+
+	DebitPurpose  *string `json:"debitPurpose,omitempty"`
+	DebitPlanId   *string `json:"debitPlanId,omitempty"`
+	DebitPlanName *string `json:"debitPlanName,omitempty"`
+	DebitId       *string `json:"debitId,omitempty"`
+
+	DebitCacheDiscount *decimal.Decimal `json:"debitCacheDiscount,omitempty"`
+
+	DebitSessionId *string `json:"debitSessionId,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+func (t *CreditsTransaction) ModelString() string {
+	s := ""
+	if t.DebitModelProvider != nil && *t.DebitModelProvider != ModelProviderOpenAI {
+		s += string(*t.DebitModelProvider) + "/"
+	}
+	if t.DebitModelName != nil {
+		s += *t.DebitModelName
+	}
+
+	return s
 }

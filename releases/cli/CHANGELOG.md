@@ -1,3 +1,399 @@
+## CLI Version 2.2.1
+## 🖇️  Connect your Claude Pro or Max subscription
+
+If you have a Claude Pro or Max subscription, Plandex can use it when calling Anthropic models. You can use it in either Integrated Models Mode on Plandex Cloud, or in BYO Key Mode (whether on Cloud or self-hosting).
+
+Assuming you're using Anthropic models (which the default model pack does), you'll be asked if you want to connect your Claude subscription the first time you run Plandex. Follow the instructions to connect.
+
+[Learn more in the docs.](https://docs.plandex.ai/models/claude-subscription)
+
+## 🐞  Bug fixes
+
+Fixed an [issue](https://github.com/plandex-ai/plandex/issues/291) with custom models and providers.
+
+## CLI Version 2.2.0
+This is a big release that is mainly focused on Plandex's model provider and model config system. It significantly increases model provider flexibility, makes custom model configuration much easier, reduces costs on Cloud, and adds built-in support for Ollama.
+
+## 🔌  Model provider flexibility for BYO key mode
+
+- Now when using Plandex in BYO key mode (either Cloud or self-hosted), you can easily use Plandex with a wide range of built-in model providers.
+
+- Apart from OpenRouter and the OpenAI API (which were already built-in), built-in providers now include:
+  - Anthropic API
+  - Google AI Studio
+  - Google Vertex AI
+  - Azure OpenAI
+  - AWS Bedrock
+  - DeepSeek API
+  - Perplexity API
+  - Ollama (for local models—see below for details)
+
+- See the new [model provider docs](https://docs.plandex.ai/models/model-providers) for more details.
+
+![plandex-model-providers](https://github.com/plandex-ai/plandex/blob/main/releases/images/cli/2.2.0/new-providers.gif)
+
+## 🛟  Provider fallback
+
+- When API keys/credentials are provided for multiple providers for a model, Plandex will fail over to the last valid provider if the first one fails. This is especially useful when using a direct provider (like OpenAI or Anthropic) alongside OpenRouter. If the direct call fails, Plandex will fall back to OpenRouter, which has its *own* internal fallback system across multiple providers. You get the best of both worlds: direct access by default, with no additional cost or latency, plus multi-layered resilience in case of stability issues.
+
+## 💰  5.5% price reduction for Plandex Cloud Integrated Models mode
+
+- Thanks to the new model provider system described above, Plandex Cloud with Integrated Models mode can now make direct provider calls under the hood rather than defaulting to OpenRouter, which allows us to avoid OpenRouter's 5.5% surcharge on model calls and pass the savings on to you. OpenRouter is still used as a fallback for added resilience.
+
+## ⚙️  JSON-based model config with IDE support
+
+- Plandex now supports JSON-based model config, which make it much easier to try out different models, different settings, and to use custom models, providers, and model packs.
+
+- The new JSON model config system integrates cleanly with your IDE or editor. When you first edit model settings, Plandex will prompt you to set a preferred editor, and the JSON config file will be opened in that editor.
+
+- Model config files use JSON schemas, which allows for autocomplete, validation, and inline documentation/type hints in most IDEs and editors.
+
+- Check out the new docs for [model settings](https://docs.plandex.ai/models/model-settings) and [custom models](https://docs.plandex.ai/models/custom-models) for full details.
+
+### `set-model` and `set-model default` commands
+
+- `set-model` has been simplified to work with the new system. If run without arguments, you'll be prompted to either select a built-in or custom model pack, or to directly edit the current plan's model config inline in JSON. You can also pass it a model pack name (`set-model daily-driver`) or jump straight to the JSON settings with `set-model --json`.
+
+- `set-model default` works the same way, but allows you to configure the default model settings for new plans.
+
+![plandex-model-settings-json](https://github.com/plandex-ai/plandex/blob/main/releases/images/cli/2.2.0/model-settings-json.gif)
+
+
+### `models custom` command
+
+- `models custom` is a new all-in-one command for managing custom providers, models, and model packs in one place. It replaces the `models add`, `models delete`, `model-packs create`, `model-packs update`, and `model-packs delete` commands.
+
+- The first time you run it, if you haven't already configured any custom models or model packs, an example config file will be created to get you started. If you *do* already have custom models or model packs configured, the config file will be populated with those models and model packs.
+
+![plandex-custom-models-json](https://github.com/plandex-ai/plandex/blob/main/releases/images/cli/2.2.0/custom-models-json.gif)
+
+### `models` and `models default` commands
+
+- The `models` and `models default` commands now show simplified output by default, with a new `--all` flag to show all properties.
+
+- These commands also now show all fallback models (for large context, large output, errors, etc.) for each role, including multiple levels of fallback, which previously weren't always included in the output.
+
+## 🦙  Built-in Ollama support
+
+- Plandex now offers built-in support for Ollama, which makes it much easier to use local models. Check out the new [Ollama quickstart](https://docs.plandex.ai/models/ollama) for details.
+
+![plandex-ollama](https://github.com/plandex-ai/plandex/blob/main/releases/images/cli/2.2.0/ollama.gif)
+
+## 📖  Built-in models and models packs
+
+- The docs now include all built-in [models](https://docs.plandex.ai/models/built-in/built-in-models) and [model packs](https://docs.plandex.ai/models/built-in/built-in-packs), making it easier to see what's available, and the settings for each model/model pack.
+
+## 🧠  New built-in models
+
+- `mistral/devstral-small`, with both OpenRouter and Ollama providers.
+
+- The Qwen 3 series of models, from 8B to 235B, available with `cloud` variants for OpenRouter and `local` variants for Ollama.
+
+- Distilled local versions of `deepseek/r1`, from 8b to 70b, available with Ollama provider.
+
+## 🎛️  New model packs
+
+- The `gemini-exp` model pack has been removed, and in its place there's now a new `gemini-planner` model pack, which uses Gemini 2.5 Pro for planning and context selection, and the default models for other roles, as well as a new `google` model pack, which uses either Gemini 2.5 Pro or Gemini 2.5 Flash for all roles.
+
+- A new `o3-planner` model pack has been added, which uses OpenAI o3-medium for planning and context selection, and the default models for other roles.
+
+## 🔄  Other built-in model updates
+
+- Built-in Gemini 2.5 Pro and Gemini 2.5 Flash models now use the latest model identifiers (replacing old 2.5 Pro Preview and 2.5 Flash Preview identifiers)
+
+- The `gemini-preview` model pack has been removed, and a new `gemini-planner` model pack has been added, which uses Gemini 2.5 Pro for planning and context selection, and the default models for other roles.
+
+- OpenAI o3 models have had their pricing drastically reduced when using Plandex Cloud with Integrated Models mode—input tokens now cost $2/M, output $8/M, an 80% reduction.
+
+- The `deepseek/r1` model has been updated to use the latest model identifier (`deepseek/deepseek-r1-0528`) on OpenRouter.
+
+## 🐞  Bug fixes
+
+- Fixed a file mapping bug for TypeScript files that caused directly exported symbols like `export const foo = 'bar'` to be omitted from map files. Also improved TypeScript mapping support for some other constructs like `declare global`, `namespace`, and `enum` blocks, and improved handling of arrow functions. Thanks to @mnahkies for the [PR](https://github.com/plandex-ai/plandex/pull/239) identifying this.
+
+## 🔧  Other changes
+
+- `plandex checkout` now has a `--yes/-y` flag to auto-confirm creating a new branch if it doesn't exist, so the command can be used for scripting with no user interaction.
+
+- `plandex tell`, `plandex continue`, and `plandex build` all now support a `--skip-menu` flag to skip the interactive menu that appears when the response finishes and changes are pending. There's also a new `skip-changes-menu` config setting that can be set to `true` to skip this menu by default.
+
+## CLI Version 2.1.6+1
+- Error handling fix
+- Fix for some roles in the `daily-driver` model pack that weren't correctly updated to Sonnet 4 in 2.1.6
+- Added fallback from Sonnet 4 to Sonnet 3.7 to deal with occasional provider errors and rate limit issues
+
+## CLI Version 2.1.6
+- The newly released Claude Sonnet 4 is now stable in testing, so it now replaces Sonnet 3.7 as the default model for context sizes under 200k across all model packs where 3.7 was previously used.
+- A new `strong-opus` model pack is now available. It uses Claude Opus 4 for planning and coding, and is otherwise the same as the 'strong' pack. Use it with `\set-model strong-opus` to try it out.
+- The `opus-4-planner` model pack that was introduced in 2.1.5 has been renamed to `opus-planner`, but the old name is still supported. This model pack uses Claude Opus 4 for planning, and the default models for other roles.
+- Fix for occasional garbled error message when the model is unresponsive.
+- Fix for occasional 'couldn't aquire lock' error after stream finishes.
+- Additional retry when model is unresponsive or hits provider rate limits—helps particularly with new Opus 4 model on OpenRouter.
+
+## CLI Version 2.1.5
+- Added newly released Claude Sonnet 4 and Claude Opus 4 as built-in models.
+- Sonnet 4 isn't yet used in the default 'daily-driver' model pack due to sporadic errors in early testing, but it can be used with the 'sonnet-4-daily' model pack (use '\set-model sonnet-4-daily' to use it). It will be promoted to the default model pack soon.
+- Opus 4 can be used with the 'opus-4-planner' model pack ( '\set-model opus-4-planner'), which uses Opus 4 for planning and Sonnet 4 for coding.
+- Removed error fallbacks for o4-mini and gemini-2.5-pro-preview.
+
+## CLI Version 2.1.3
+- Fix for default model pack not being correctly applied to new plans
+- Fix for potential crash on Linux when applying a plan
+
+## CLI Version 2.1.2
+- Fix for rare auto-load context timeout error when no files are loaded.
+
+## CLI Version 2.1.1
+- Fix for free Gemini 2.5 Pro Experimental OpenRouter endpoint.
+- Retries for "No endpoints found that support cache control" error that showed up when OpenRouter temporarily disabled caching for Gemini 2.5 Pro Preview.
+- Other minor improvements to error handling and retries.
+
+## CLI Version 2.1.0+1
+- Fix for potential encoding issue when loading files into context.
+
+## CLI Version 2.1.0
+## 🚀  OpenRouter only for BYO key
+
+- When using a BYO key mode (either cloud or self-hosted), you can now use Plandex with **only** an OpenRouter.ai account and `OPENROUTER_API_KEY` set. A separate OpenAI account is no longer required.
+
+- You can still use a separate OpenAI account if desired by setting the `OPENAI_API_KEY` environment variable in addition to `OPENROUTER_API_KEY`. This will cause OpenAI models to make direct calls to OpenAI, which is slightly faster and cheaper.
+
+## 🧠  New Models
+
+### Gemini
+
+- Google's Gemini 2.5 Pro Preview is now available as a built-in model, and is the new default model when context is between 200k and 1M tokens.
+
+- A new `gemini-preview` model pack has been added, which uses Gemini 2.5 Pro Preview for planning and coding, and default models for other roles. You can use this pack by running the REPL with the `--gemini-preview` flag (`plandex --gemini-preview`), or with `\set-model gemini-preview` from inside the REPL. Because this model is still in preview, a fallback to Gemini 1.5 Pro is used on failure.
+
+- Google's Gemini Flash 2.5 Preview is also now available as a built-in model. While it's not currently used by default in any built-in model packs, you can use with `\set-model` or a custom model pack.
+
+### OpenAI
+
+- OpenAI's o4-mini is now available as a built-in model with `high`, `medium`, and `low` reasoning effort levels. o3-mini has been replaced by the corresponding o4-mini models across all model packs, with a fallback to o3-mini on failure. This improves Plandex's file edit reliability and performance with no increase in costs. o4-mini-medium is also the new default planning model for the `cheap` model pack.
+
+- OpenAI's o3 is now available as a built-in model with `high`, `medium`, and `low` reasoning effort levels. Note that if you're using Plandex in BYO key mode, OpenAI requires an organization verification step before you can use o3.
+
+- o3-high is the new default planning model for the `strong` model pack, replacing o1. Due to the verification requirements for o3, the `strong` pack falls back to o4-mini-high for planning if o3 is not available.
+
+- OpenAI's gpt-4.1, gpt-4.1-mini, and gpt-4.1-nano have been added as built-in models, replacing gpt-4o and gpt-4o-mini in all model packs that used them previously.
+
+- gpt-4.1 is now used as a large context fallback for the default `coder` role, effectively increasing the context limit for the implementation phase from 200k to 1M tokens.
+
+- gpt-4.1 is also the new `coder` model in the `cheap` model pack, and is also the new main planning and coding model in the `openai` model pack.
+
+## 🛟  Model Fallbacks
+
+- In order to better incorporate newly released models and preview models that may have initial reliability or capacity issues, a more robust fallback and retry system has been implemented. This will allow for faster introduction of new models in the future while still maintaining a high level of reliability.
+
+- Fallbacks for 'context length exceeded' errors have also been improved, so that these errors will now trigger an automatic fallback to a model with a larger context limit if one is defined in the model pack. This will fix issues like https://github.com/plandex-ai/plandex/issues/232 where the stream errors with a 400 or 413 error when context is exceeded instead of falling back correctly.
+
+## 💰  Gemini Caching
+
+- Gemini models now support prompt caching, significantly reducing costs and latency during planning, implementation, and builds when using Gemini models.
+
+## 🤫  Quieter Reasoning
+
+- When using Claude 3.7 Sonnet thinking model in the `reasoning` AND `strong` model packs, reasoning is no longer included by default. This clears up some issues that were caused by output with specific formatting that Plandex takes action on being duplicated between the reasoning and the main output. It also feels a bit more relaxed to keep the reasoning behind-the-scenes, even though there can be a longer wait for the initial output.
+
+## 💻  REPL Improvements
+
+- Additional handling of possibly incorrect or mistyped commands in the REPL. Now apart from suggesting commands only based on possibly mistyped backslash commands, any likely command with or without the backslash will suggest possible commands rather than sending the prompt straight to the AI model, which can waste tokens due to minor typos or a missing backslash.
+
+## ☁️  Plandex Cloud
+
+- If you started a free trial of Plandex Cloud with BYO Key mode, you can now switch to a trial of Integrated Models mode if desired from your [billing dashboard](https://app.plandex.ai/settings/billing) (use `illing` from the REPL to open the dashboard).
+
+- When doing a trial in Integrated Models mode, you will now be warned when your trial credits balance goes below $1.00.
+
+- In Integrated Models mode, the required number of credits to send a prompt is now much lower, so you can use more credits before getting an 'Insufficient credits' message.
+
+## 🐞  Bug Fixes
+
+- Fix for 'Plan replacement failed' error during file edits on Windows that was caused by mismatched line endings.
+
+- Fix for 'tool calls not supported' error for custom models that use the XML output format (https://github.com/plandex-ai/plandex/issues/238).
+
+- Fix for errors in some roles with Anthropic models when only a single system message was sent (https://github.com/plandex-ai/plandex/issues/208).
+
+- Fix for potential back-pressure issue with large/concurrent project map operations.
+
+- Plandex Cloud: fix for JSON parsing error on payment form when the card is declined. It will now show the proper error message.
+
+## CLI Version 2.0.7+1
+- Small adjustment to previous release: in the REPL, select the first auto-complete suggestion on 'enter' if any suggestions are listed.
+
+## CLI Version 2.0.7
+- Better handling of partial or mistyped commands in the REPL. Rather than falling through to the AI model, a partial `\` command that matches only a single option will default to that command. If multiple commands could match, you'll be given a list of options. For input that begins with a `\` but doesn't match any command, there is now a confirmation step. This helps to prevent accidentally sending mistyped commands the model and burning tokens.
+
+## CLI Version 2.0.6
+- Timeout for 'plandex browser' log capture command
+- Better failure handling for 'plandex browser' command
+
+## CLI Version 2.0.5
+- Consolidated to a single model pack for Gemini 2.5 Pro Experimental: 'gemini-exp'. Use it with 'plandex --gemini-exp' or '\set-model gemini-exp' in the REPL.
+- Prevent the '\send' command from being included in the prompt when using multi-line mode in the REPL.
+
+## CLI Version 2.0.4
+- **Models**
+  - Claude Sonnet 3.7 thinking is now available as a built-in model. Try the `reasoning` model pack for more challenging tasks.
+  - Gemini 2.5 pro (free/experimental version) is now available. Try the 'gemini-planner' or 'gemini-experimental' model packs to use it.
+  - DeepSeek V3 03-24 version is available as a built-in model and is now used in the `oss` pack in the in the the `coder` role. 
+  - OpenAI GPT 4.5 is available as a built-in model. It's not in any model packs so far due to rate limits and high cost, but is available to use via `set-model`
+  
+- **Debugging**
+  - Plandex can now directly debug browser applications by catching errors and reading the console logs (requires Chrome).
+  - Enhanced signal handling and subprocess termination robustness for execution control.
+
+- **Model Packs**
+  - Added commands:
+    - `model-packs update`
+    - `model-packs show`
+
+- **Reliability**
+  - Implemented HTTP retry logic with exponential backoff for transient errors.    
+
+- **REPL**
+  - Fixed whitespace handling issues.
+  - Improved command execution flow.
+
+- **Installation**
+  - Clarified support for WSL-only environments.
+  - Better handling of sudo and alias creation on Linux.
+
+## CLI Version 2.0.3
+- Fix potential race condition/goroutine explosion/crash in context update.
+- Prevent crash with negative viewport height in stream tui.
+
+## CLI Version 2.0.2
+- Fixed bug where context auto-load would hang if there was no valid context to load (for example, if they're all directories, which is only discovered client-side, and which can't be auto-loaded)
+- Fixed bug where the build output would sometimes wrap incorrectly, causing the Plan Stream TUI to get out of sync with the build output.
+- Fixed bug where build output would jump between collapsed and expanded states during a stream, after the user manually expanded.
+
+## CLI Version 2.0.1
+- Fix for REPL startup failing when self-hosting or using BYOK cloud mode (https://github.com/plandex-ai/plandex/issues/216)
+- Fix for potential crash with custom model pack (https://github.com/plandex-ai/plandex/issues/217)
+
+## CLI Version 2.0.0
+👋 Hi, Dane here. I'm the creator and lead developer of Plandex.
+
+I'm excited to announce the beta release of Plandex v2, featuring major improvements in capabilities, user experience, and automation.
+
+Plandex
+
+## 🤖  Overview
+
+While built on the same basic foundations as v1, v2 is best thought of as a new project with far more ambitious goals. 
+
+Plandex is now a top-tier coding agent with fully autonomous capabilities.
+
+By default, it combines the strengths of three top foundation model providers—Anthropic, OpenAI, and Google—to achieve significantly better coding results than can be achieved with only a single provider's models.
+
+You get the coding abilities of Anthropic, the cost-effectiveness and speed of OpenAI's o3 mini, and the massive 2M token context window of Google Gemini, each used in the roles they're best suited for.
+
+Plandex can: 
+  - Discuss a project or feature at a high level
+  - Load relevant context as needed throughout the discussion
+  - Solidify the discussion into a detailed plan
+  - Implement the changes
+  - Apply the changes to your files
+  - Run necessary commands
+  - Automatically debug failures
+
+Adding these capabilities together, Plandex can handle complex tasks that span entire large features or entire projects, generating 50-100 files or more in a single run.
+
+Below is a more detailed look at what's new. You can also check out the updated [README](https://github.com/plandex-ai/plandex/blob/main/README.md), [website](https://plandex.ai), and [docs](https://docs.plandex.ai).
+
+## 🧠  Newer, Smarter Models
+
+- New default model pack combining Claude 3.7 Sonnet, o3-mini, and Gemini 1.5 Pro.
+
+- A new set of built-in models and model packs for different use cases, including `daily-driver` (the default pack), `strong`, `cheap`, and `oss` packs, among others.
+
+- New `architect` and `coder` roles that make it easier to use different models for different stages in the planning and implementation process.
+
+## 📥  Better Context Management
+
+- Automatic context selection with tree-sitter project maps (30+ languages supported).
+
+- Effective 2M token context window for large tasks (massive codebases of ~20M tokens and more can be indexed for automatic context selection).
+
+- Smart context management limits implementation steps to necessary files only, reducing costs and latency.
+
+- Prompt caching for OpenAI and Anthropic models further reduces latency and costs.
+
+## 📝  Reliable File Edits
+
+- Much improved file editing performance and reliability, especially for large files.
+
+- Simple edits can often be applied deterministically without a model call, reducing costs and latency.
+
+- For more complex edits, validation and multiple fallbacks help ensure a very low failure rate.
+
+- Supports individual files up to 100k tokens.
+
+- On Plandex Cloud, a fine-tuned "instant apply" model further speeds up and reduces the cost of editing files up to 32k tokens in size. This is offered at no additional cost.
+
+## 💻  New Developer Experience
+
+- v2 includes a new default way to use Plandex: the Plandex REPL. Just type `plandex` in any project directory to start the REPL.
+
+- Simple and intuitive chat-like experience.
+
+- Fuzzy autocomplete for commands and files, 'chat' vs. 'tell' modes that separate ideation from implementation, and a multi-line mode for friendly editing of long prompts.
+
+- All commands are still available as CLI calls directly from the terminal.
+
+## 🚀  Configurable Automation
+
+- Plandex is now capable of full autonomy with 'full auto' mode. It can load necessary context, apply changes, execute commands, and automatically debug problems.
+
+- The automation level can be precisely configured depending on the task and your comfort level. A `basic` mode works just like Plandex v1, where files are loaded manually and execution is disabled. The new default in v2 is `semi-auto`, which enables automatic context loading, but still requires approval to apply changes and execute commands.
+
+- By default, Plandex now includes command execution (with approval) in its planning process. It can install dependencies, build and run code, run tests, and more.
+
+- Command execution is integrated with Plandex's diff review sandbox. Changes are tentatively applied before running commands, then rolled back if the command fails.
+
+- A new `debug` command allows for automated debugging of any terminal command. Use it with type checkers, linters, builds, tests, and more.
+
+## 💳  Built-in Payments, Credits, and Budgeting on Plandex Cloud
+
+- Apart from the open source version of Plandex, which includes **all core features**, Plandex Cloud is a full-fledged product.
+
+- It offers two subscription options: an **Integrated Models** mode that requires no additional accounts or API keys, and a **BYO API Key** mode that allows you to use your own OpenAI and OpenRouter.ai accounts and API keys. 
+
+- In Integrated Models mode, you buy credits from Plandex Cloud and manage billing centrally. It includes usage tracking and reporting via the `usage` command, as well as convenience and budgeting features like an auto-recharge threshold, a notification threshold on monthly spend, and an overall monthly limit. You can [learn more about pricing here](https://plandex.ai#pricing).
+
+- Billing settings are managed with a web dashboard (it can be accessed via the CLI with the `billing` command).
+
+## 🪪  License Update
+
+- Plandex has transitioned from AGPL 3.0 to the MIT License, simplifying future open-source contributions and allowing easier integration of proprietary enhancements in Plandex Cloud and related products.
+
+- If you’ve previously contributed under AGPL and have concerns about this relicensing, please [reach out.](mailto:dane@plandex.ai)
+
+## 🧰  And More
+
+This isn't an exhaustive list! Apart from the above, there are many smaller features, bug fixes, and quality of life improvements. Give the updated [docs](https://docs.plandex.ai) a read for a full accounting of all commands and functionality.
+
+## 🌟  Get Started
+
+Go to the [quickstart](https://docs.plandex.ai/quickstart) to get started with v2 in minutes.
+
+**Note:** while built on the same foundations, Plandex v2 is designed to be a run separately and independently from v1. It's not an in-place upgrade. So there's nothing in particular you need to do to upgrade; just follow the quickstart as if you were a brand new user. [More details here.](https://docs.plandex.ai/upgrading-v1-to-v2)
+
+## 🙌  Don't Be A Stranger
+
+- Jump into the [Plandex Discord](https://discord.gg/plandex-ai) if you have questions or feedback, or just want to hang out.
+
+- You can [post an issue on GitHub](https://github.com/plandex-ai/plandex/issues) or [start a discussion](https://github.com/plandex-ai/plandex/discussions).
+
+- You can reach out by email: [support@plandex.ai](mailto:support@plandex.ai).
+
+- You can follow [@PlandexAI](https://x.com/plandexai) or my personal account [@Danenania](https://x.com/danenania) on X for updates, announcements, and random musings.
+
+- You can subscribe on [YouTube](https://www.youtube.com/@plandex-ny5ry) for demonstrations, tutorials, and AI coding projects.
+
 ## Version 1.1.1
 ## Fix for terminal flickering when streaming plans 📺
 

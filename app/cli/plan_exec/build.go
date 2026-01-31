@@ -3,17 +3,26 @@ package plan_exec
 import (
 	"fmt"
 	"log"
-	"os"
-	"plandex/api"
-	"plandex/fs"
-	"plandex/stream"
-	streamtui "plandex/stream_tui"
-	"plandex/term"
+	"plandex-cli/api"
+	"plandex-cli/fs"
+	"plandex-cli/stream"
+	streamtui "plandex-cli/stream_tui"
+	"plandex-cli/term"
+	"plandex-cli/types"
 
-	"github.com/plandex/plandex/shared"
+	shared "plandex-shared"
 )
 
-func Build(params ExecParams, buildBg bool) (bool, error) {
+func Build(params ExecParams, flags types.BuildFlags) (bool, error) {
+	buildBg := flags.BuildBg
+
+	term.StartSpinner("")
+
+	err := PromptSyncModelsIfNeeded()
+	if err != nil {
+		term.OutputErrorAndExit("Error syncing models: %v", err)
+	}
+
 	term.StartSpinner("")
 
 	contexts, apiErr := api.Client.ListContext(params.CurrentPlanId, params.CurrentBranch)
@@ -22,7 +31,13 @@ func Build(params ExecParams, buildBg bool) (bool, error) {
 		term.OutputErrorAndExit("Error getting context: %v", apiErr)
 	}
 
-	anyOutdated, didUpdate, err := params.CheckOutdatedContext(contexts)
+	paths, err := fs.GetProjectPaths(fs.GetBaseDirForContexts(contexts))
+
+	if err != nil {
+		return false, fmt.Errorf("error getting project paths: %v", err)
+	}
+
+	anyOutdated, didUpdate, err := params.CheckOutdatedContext(contexts, paths)
 
 	if err != nil {
 		term.OutputErrorAndExit("error checking outdated context: %v", err)
@@ -34,35 +49,10 @@ func Build(params ExecParams, buildBg bool) (bool, error) {
 		return false, nil
 	}
 
-	paths, err := fs.GetProjectPaths(fs.GetBaseDirForContexts(contexts))
-
-	if err != nil {
-		return false, fmt.Errorf("error getting project paths: %v", err)
-	}
-
-	var legacyApiKey, openAIBase, openAIOrgId string
-
-	if params.ApiKeys["OPENAI_API_KEY"] != "" {
-		legacyApiKey = params.ApiKeys["OPENAI_API_KEY"]
-		openAIBase = os.Getenv("OPENAI_API_BASE")
-		if openAIBase == "" {
-			openAIBase = os.Getenv("OPENAI_ENDPOINT")
-		}
-		openAIOrgId = os.Getenv("OPENAI_ORG_ID")
-	}
-
-	// log.Println("Building plan...")
-	// log.Println("API keys:", params.ApiKeys)
-	// log.Println("Legacy API key:", legacyApiKey)
-
 	apiErr = api.Client.BuildPlan(params.CurrentPlanId, params.CurrentBranch, shared.BuildPlanRequest{
 		ConnectStream: !buildBg,
 		ProjectPaths:  paths.ActivePaths,
-		ApiKey:        legacyApiKey, // deprecated
-		Endpoint:      openAIBase,   // deprecated
-		ApiKeys:       params.ApiKeys,
-		OpenAIBase:    openAIBase,
-		OpenAIOrgId:   openAIOrgId,
+		AuthVars:      params.AuthVars,
 	}, stream.OnStreamPlan)
 
 	term.StopSpinner()
@@ -80,7 +70,7 @@ func Build(params ExecParams, buildBg bool) (bool, error) {
 		ch := make(chan error)
 
 		go func() {
-			err := streamtui.StartStreamUI("", true)
+			err := streamtui.StartStreamUI("", true, !flags.AutoApply)
 
 			if err != nil {
 				ch <- fmt.Errorf("error starting stream UI: %v", err)

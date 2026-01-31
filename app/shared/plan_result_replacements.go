@@ -150,6 +150,7 @@ func (planState *CurrentPlanState) GetFilesBeforeReplacement(
 	files := make(map[string]string)
 	shas := make(map[string]string)
 	updatedAtByPath := make(map[string]time.Time)
+	removedByPath := make(map[string]bool)
 
 	for path, planResults := range planRes.FileResultsByPath {
 		updated := files[path]
@@ -163,20 +164,36 @@ func (planState *CurrentPlanState) GetFilesBeforeReplacement(
 		for _, planRes := range planResults {
 
 			// log.Println("planRes: ", planRes.Id)
+			// log.Println(spew.Sdump(planRes))
 
 			if !planRes.IsPending() {
 				// log.Println("Plan result is not pending -- continuing loop")
 				continue
 			}
 
+			if planRes.RemovedFile {
+				updated = ""
+				delete(files, path)
+				delete(shas, path)
+				delete(updatedAtByPath, path)
+				removedByPath[path] = true
+				continue
+			}
+
 			if len(planRes.Replacements) == 0 {
 				if updated != "" {
+					log.Println("plan updates out of order:", path)
+					log.Println("updated:")
+					log.Println(updated)
+					log.Println("planRes.Content:")
+					log.Println(planRes.Content)
 					return nil, fmt.Errorf("plan updates out of order: %s", path)
 				}
 
 				updated = planRes.Content
 				files[path] = updated
 				updatedAtByPath[path] = planRes.CreatedAt
+				delete(removedByPath, path)
 
 				continue
 			} else if updated == "" {
@@ -214,7 +231,7 @@ func (planState *CurrentPlanState) GetFilesBeforeReplacement(
 
 				maybeWithLineNums := updated
 				if planRes.ReplaceWithLineNums {
-					maybeWithLineNums = AddLineNums(updated)
+					maybeWithLineNums = string(AddLineNums(maybeWithLineNums))
 				}
 
 				// log.Println("Before replacements. updated:")
@@ -222,7 +239,7 @@ func (planState *CurrentPlanState) GetFilesBeforeReplacement(
 
 				updated, allSucceeded = ApplyReplacements(maybeWithLineNums, replacements, false)
 
-				updated = RemoveLineNums(updated)
+				updated = string(RemoveLineNums(LineNumberedTextType(updated)))
 
 				if !allSucceeded {
 					log.Println("Failed to apply replacements")
@@ -252,39 +269,5 @@ func (planState *CurrentPlanState) GetFilesBeforeReplacement(
 		files[path] = updated
 	}
 
-	return &CurrentPlanFiles{Files: files, UpdatedAtByPath: updatedAtByPath}, nil
+	return &CurrentPlanFiles{Files: files, UpdatedAtByPath: updatedAtByPath, Removed: removedByPath}, nil
 }
-
-// func getUniqueFuzzyIndex(doc, s string) int {
-// 	words := strings.Fields(s)
-// 	if len(words) < 2 {
-// 		return -1
-// 	}
-
-// 	searchStart := regexp.QuoteMeta(words[0])
-// 	searchEnd := regexp.QuoteMeta(words[len(words)-1])
-
-// 	// Loop to expand search pattern gradually from both ends towards the center
-// 	for i := 0; i < len(words)/2; i++ { // Ensure we do not go out of bounds
-// 		// Construct the regex pattern
-// 		regexPattern := fmt.Sprintf("%s.*%s", searchStart, searchEnd)
-// 		re, err := regexp.Compile(regexPattern)
-// 		if err != nil {
-// 			return -1 // Handle regex compilation error
-// 		}
-
-// 		// Find all matches of the pattern in the document
-// 		matches := re.FindAllStringIndex(doc, -1)
-// 		if len(matches) == 1 {
-// 			return matches[0][0] // Return the start index of the unique match
-// 		}
-
-// 		// Update search strings if possible
-// 		if i+1 < len(words)/2 {
-// 			searchStart += " " + regexp.QuoteMeta(words[i+1])
-// 			searchEnd = regexp.QuoteMeta(words[len(words)-i-2]) + " " + searchEnd
-// 		}
-// 	}
-
-// 	return -1
-// }

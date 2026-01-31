@@ -1,16 +1,22 @@
 package types
 
 import (
-	"github.com/plandex/plandex/shared"
+	shared "plandex-shared"
+	"time"
+
 	"github.com/sashabaranov/go-openai"
 )
 
 type LoadContextParams struct {
-	Note            string
-	Recursive       bool
-	NamesOnly       bool
-	ForceSkipIgnore bool
-	ImageDetail     openai.ImageURLDetail
+	Note              string
+	Recursive         bool
+	NamesOnly         bool
+	ForceSkipIgnore   bool
+	ImageDetail       openai.ImageURLDetail
+	DefsOnly          bool
+	SkipIgnoreWarning bool
+	AutoLoaded        bool
+	SessionId         string
 }
 
 type ContextOutdatedResult struct {
@@ -21,8 +27,10 @@ type ContextOutdatedResult struct {
 	NumFiles        int
 	NumUrls         int
 	NumTrees        int
+	NumMaps         int
 	NumFilesRemoved int
 	NumTreesRemoved int
+	ReqFn           func() (map[string]*shared.UpdateContextParams, error)
 }
 
 const (
@@ -57,4 +65,21 @@ type ChangesUIScrollReplacement struct {
 
 type ChangesUIViewportsUpdate struct {
 	ScrollReplacement *ChangesUIScrollReplacement
+}
+
+type OnErrFn func(errMsg string, errArgs ...interface{})
+
+type OauthResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+}
+
+type OauthCreds struct {
+	OauthResponse
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type AccountCredentials struct {
+	ClaudeMax *OauthCreds `json:"claudeMax"`
 }

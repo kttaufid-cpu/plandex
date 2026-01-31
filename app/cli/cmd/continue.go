@@ -1,13 +1,18 @@
 package cmd
 
 import (
-	"plandex/auth"
-	"plandex/lib"
-	"plandex/plan_exec"
-	"plandex/term"
+	"plandex-cli/auth"
+	"plandex-cli/lib"
+	"plandex-cli/plan_exec"
+	"plandex-cli/types"
 
-	"github.com/plandex/plandex/shared"
+	shared "plandex-shared"
+
 	"github.com/spf13/cobra"
+)
+
+var (
+	chatOnly bool
 )
 
 var continueCmd = &cobra.Command{
@@ -20,40 +25,59 @@ var continueCmd = &cobra.Command{
 func init() {
 	RootCmd.AddCommand(continueCmd)
 
-	continueCmd.Flags().BoolVarP(&tellStop, "stop", "s", false, "Stop after a single reply")
-	continueCmd.Flags().BoolVarP(&tellNoBuild, "no-build", "n", false, "Don't build files")
-	continueCmd.Flags().BoolVar(&tellBg, "bg", false, "Execute autonomously in the background")
+	continueCmd.Flags().BoolVar(&chatOnly, "chat", false, "Continue in chat mode (no file changes)")
 
-	continueCmd.Flags().BoolVarP(&autoConfirm, "yes", "y", false, "Automatically confirm context updates")
-	continueCmd.Flags().BoolVarP(&tellAutoApply, "apply", "a", false, "Automatically apply changes (and confirm context updates)")
-	continueCmd.Flags().BoolVarP(&autoCommit, "commit", "c", false, "Commit changes to git when --apply/-a is passed")
+	initExecFlags(continueCmd, initExecFlagsParams{
+		omitFile:   true,
+		omitEditor: true,
+	})
 }
 
 func doContinue(cmd *cobra.Command, args []string) {
-	validateTellFlags()
-
 	auth.MustResolveAuthWithOrg()
 	lib.MustResolveProject()
+	mustSetPlanExecFlags(cmd, false)
 
-	if lib.CurrentPlanId == "" {
-		term.OutputNoCurrentPlanErrorAndExit()
-	}
-
-	var apiKeys map[string]string
-	if !auth.Current.IntegratedModelsMode {
-		apiKeys = lib.MustVerifyApiKeys()
+	tellFlags := types.TellFlags{
+		TellBg:          tellBg,
+		TellStop:        tellStop,
+		TellNoBuild:     tellNoBuild,
+		IsUserContinue:  true,
+		ExecEnabled:     !noExec,
+		AutoContext:     tellAutoContext,
+		SmartContext:    tellSmartContext,
+		AutoApply:       tellAutoApply,
+		IsChatOnly:      chatOnly,
+		SkipChangesMenu: tellSkipMenu,
 	}
 
 	plan_exec.TellPlan(plan_exec.ExecParams{
 		CurrentPlanId: lib.CurrentPlanId,
 		CurrentBranch: lib.CurrentBranch,
-		ApiKeys:       apiKeys,
-		CheckOutdatedContext: func(maybeContexts []*shared.Context) (bool, bool, error) {
-			return lib.CheckOutdatedContextWithOutput(false, autoConfirm || tellAutoApply, maybeContexts)
+		AuthVars:      lib.MustVerifyAuthVars(auth.Current.IntegratedModelsMode),
+		CheckOutdatedContext: func(maybeContexts []*shared.Context, projectPaths *types.ProjectPaths) (bool, bool, error) {
+			auto := autoConfirm || tellAutoApply || tellAutoContext
+
+			return lib.CheckOutdatedContextWithOutput(auto, auto, maybeContexts, projectPaths)
 		},
-	}, "", tellBg, tellStop, tellNoBuild, true, false, false)
+	}, "", tellFlags)
 
 	if tellAutoApply {
-		lib.MustApplyPlan(lib.CurrentPlanId, lib.CurrentBranch, true, autoCommit, !autoCommit)
+		applyFlags := types.ApplyFlags{
+			AutoConfirm: true,
+			AutoCommit:  autoCommit,
+			NoCommit:    !autoCommit,
+			AutoExec:    autoExec,
+			NoExec:      noExec,
+			AutoDebug:   autoDebug,
+		}
+
+		lib.MustApplyPlan(lib.ApplyPlanParams{
+			PlanId:     lib.CurrentPlanId,
+			Branch:     lib.CurrentBranch,
+			ApplyFlags: applyFlags,
+			TellFlags:  tellFlags,
+			OnExecFail: plan_exec.GetOnApplyExecFail(applyFlags, tellFlags),
+		})
 	}
 }

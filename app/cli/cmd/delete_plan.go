@@ -2,16 +2,18 @@ package cmd
 
 import (
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 
-	"plandex/api"
-	"plandex/auth"
-	"plandex/lib"
-	"plandex/term"
+	"plandex-cli/api"
+	"plandex-cli/auth"
+	"plandex-cli/lib"
+	"plandex-cli/term"
+
+	shared "plandex-shared"
 
 	"github.com/fatih/color"
-	"github.com/plandex/plandex/shared"
 	"github.com/spf13/cobra"
 )
 
@@ -26,9 +28,19 @@ func init() {
 var rmCmd = &cobra.Command{
 	Use:     "delete-plan [name-or-index]",
 	Aliases: []string{"dp"},
-	Short:   "Delete a plan by name or index, or delete all plans with --all flag",
+	Short:   "Delete a plan by name, index, range, or pattern, or select from a list. Delete all plans with --all flag.",
 	Args:    cobra.RangeArgs(0, 1),
 	Run:     del,
+}
+
+func matchPlansByPattern(pattern string, plans []*shared.Plan) []*shared.Plan {
+	var matched []*shared.Plan
+	for _, plan := range plans {
+		if isMatched, err := path.Match(pattern, plan.Name); err == nil && isMatched {
+			matched = append(matched, plan)
+		}
+	}
+	return matched
 }
 
 func del(cmd *cobra.Command, args []string) {
@@ -39,16 +51,6 @@ func del(cmd *cobra.Command, args []string) {
 		delAll()
 		return
 	}
-
-	var nameOrIdx string
-	if len(args) > 0 {
-		nameOrIdx = strings.TrimSpace(args[0])
-
-		if all {
-			term.OutputErrorAndExit("Can't use both --all and a plan name or index")
-		}
-	}
-	var plan *shared.Plan
 
 	term.StartSpinner("")
 	plans, apiErr := api.Client.ListPlans([]string{lib.CurrentProjectId})
@@ -65,66 +67,106 @@ func del(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if nameOrIdx == "" {
+	var plansToDelete []*shared.Plan
 
+	if len(args) == 0 {
+		// Interactive selection
 		opts := make([]string, len(plans))
 		for i, plan := range plans {
 			opts[i] = plan.Name
 		}
 
 		selected, err := term.SelectFromList("Select a plan:", opts)
-
 		if err != nil {
 			term.OutputErrorAndExit("Error selecting plan: %v", err)
 		}
 
 		for _, p := range plans {
 			if p.Name == selected {
-				plan = p
+				plansToDelete = append(plansToDelete, p)
 				break
 			}
 		}
 	} else {
+		nameOrPattern := strings.TrimSpace(args[0])
 
-		// see if it's an index
-		idx, err := strconv.Atoi(nameOrIdx)
-
-		if err == nil {
-			if idx > 0 && idx <= len(plans) {
-				plan = plans[idx-1]
-			} else {
-				term.OutputErrorAndExit("Plan index out of range")
+		// Check if it's a range of indices
+		if strings.Contains(nameOrPattern, "-") {
+			// Create single-element slice with the range pattern
+			rangeArgs := []string{nameOrPattern}
+			indices := parseIndices(rangeArgs)
+			for idx := range indices {
+				if idx >= 0 && idx < len(plans) {
+					plansToDelete = append(plansToDelete, plans[idx])
+				}
 			}
+		} else if strings.Contains(nameOrPattern, "*") {
+			// Wildcard pattern matching
+			plansToDelete = matchPlansByPattern(nameOrPattern, plans)
 		} else {
-			for _, p := range plans {
-				if p.Name == nameOrIdx {
-					plan = p
-					break
+			// Try as index first
+			idx, err := strconv.Atoi(nameOrPattern)
+			if err == nil {
+				if idx > 0 && idx <= len(plans) {
+					plansToDelete = append(plansToDelete, plans[idx-1])
+				} else {
+					term.OutputErrorAndExit("Plan index out of range")
+				}
+			} else {
+				// Try exact name match
+				for _, p := range plans {
+					if p.Name == nameOrPattern {
+						plansToDelete = append(plansToDelete, p)
+						break
+					}
 				}
 			}
 		}
 	}
 
-	if plan == nil {
-		term.OutputErrorAndExit("Plan not found")
+	if len(plansToDelete) == 0 {
+		term.OutputErrorAndExit("No matching plans found")
 	}
 
+	// Show confirmation with list of plans to be deleted
+	fmt.Printf("\nThe following %d plan(s) will be deleted:\n", len(plansToDelete))
+	for _, p := range plansToDelete {
+		fmt.Printf("  - %s\n", color.New(color.Bold, term.ColorHiCyan).Sprint(p.Name))
+	}
+	fmt.Println()
+
+	confirmed, err := term.ConfirmYesNo("Are you sure you want to delete these plans?")
+	if err != nil {
+		term.OutputErrorAndExit("Error getting confirmation: %v", err)
+	}
+	if !confirmed {
+		fmt.Println("Operation cancelled")
+		return
+	}
+
+	// Delete the plans
 	term.StartSpinner("")
-	apiErr = api.Client.DeletePlan(plan.Id)
-	term.StopSpinner()
+	for _, p := range plansToDelete {
+		apiErr = api.Client.DeletePlan(p.Id)
+		if apiErr != nil {
+			term.StopSpinner()
+			term.OutputErrorAndExit("Error deleting plan %s: %s", p.Name, apiErr.Msg)
+		}
 
-	if apiErr != nil {
-		term.OutputErrorAndExit("Error deleting plan: %s", apiErr.Msg)
-	}
-
-	if lib.CurrentPlanId == plan.Id {
-		err := lib.ClearCurrentPlan()
-		if err != nil {
-			term.OutputErrorAndExit("Error clearing current plan: %v", err)
+		if lib.CurrentPlanId == p.Id {
+			err := lib.ClearCurrentPlan()
+			if err != nil {
+				term.OutputErrorAndExit("Error clearing current plan: %v", err)
+			}
 		}
 	}
+	term.StopSpinner()
 
-	fmt.Printf("✅ Deleted plan %s\n", color.New(color.Bold, term.ColorHiCyan).Sprint(plan.Name))
+	if len(plansToDelete) == 1 {
+		fmt.Printf("✅ Deleted plan '%s'\n", plansToDelete[0].Name)
+	} else {
+		fmt.Printf("✅ Deleted %d plans\n", len(plansToDelete))
+	}
 }
 
 func delAll() {

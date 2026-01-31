@@ -1,12 +1,18 @@
 package shared
 
 import (
+	"bytes"
 	"crypto/rand"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
+
+func Pointer[T any](v T) *T {
+	return &v
+}
 
 const TsFormat = "2006-01-02T15:04:05.999Z"
 
@@ -65,24 +71,26 @@ func Capitalize(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
-func AddLineNums(s string) string {
-	return AddLineNumsWithPrefix(s, "pdx-")
+type LineNumberedTextType string
+
+func AddLineNums(s string) LineNumberedTextType {
+	return LineNumberedTextType(AddLineNumsWithPrefix(s, "pdx-"))
 }
 
-func AddLineNumsWithPrefix(s, prefix string) string {
+func AddLineNumsWithPrefix(s, prefix string) LineNumberedTextType {
 	var res string
 	for i, line := range strings.Split(s, "\n") {
 		res += fmt.Sprintf("%s%d: %s\n", prefix, i+1, line)
 	}
-	return res
+	return LineNumberedTextType(res)
 }
 
-func RemoveLineNums(s string) string {
+func RemoveLineNums(s LineNumberedTextType) string {
 	return RemoveLineNumsWithPrefix(s, "pdx-")
 }
 
-func RemoveLineNumsWithPrefix(s, prefix string) string {
-	return regexp.MustCompile(fmt.Sprintf(`(?m)^%s\d+: `, prefix)).ReplaceAllString(s, "")
+func RemoveLineNumsWithPrefix(s LineNumberedTextType, prefix string) string {
+	return regexp.MustCompile(fmt.Sprintf(`(?m)^%s\d+: `, prefix)).ReplaceAllString(string(s), "")
 }
 
 // indexRunes searches for the slice of runes `needle` in the slice of runes `haystack`
@@ -133,4 +141,43 @@ func ReplaceReverse(s, old, new string, n int) string {
 		s = res
 	}
 	return res
+}
+
+func NormalizeEOL(data []byte) []byte {
+	if !looksTextish(data) {
+		return data
+	}
+
+	// CRLF -> LF
+	n := bytes.ReplaceAll(data, []byte{'\r', '\n'}, []byte{'\n'})
+
+	// treat stray CR as newline as well
+	n = bytes.ReplaceAll(n, []byte{'\r'}, []byte{'\n'})
+	return n
+}
+
+// looksTextish checks some very cheap heuristics:
+//  1. no NUL bytes      → probably not binary
+//  2. valid UTF-8       → BOMs are OK
+//  3. printable ratio   → ≥ 90 % of runes are >= 0x20 or common whitespace
+func looksTextish(b []byte) bool {
+	if bytes.IndexByte(b, 0x00) != -1 { // 1
+		return false
+	}
+	if !utf8.Valid(b) { // 2
+		return false
+	}
+
+	printable := 0
+	for len(b) > 0 {
+		r, size := utf8.DecodeRune(b)
+		b = b[size:]
+		switch {
+		case r == '\n', r == '\r', r == '\t':
+			printable++
+		case r >= 0x20 && r != 0x7f:
+			printable++
+		}
+	}
+	return float64(printable)/float64(len(b)) > 0.90 // 3
 }

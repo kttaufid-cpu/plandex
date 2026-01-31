@@ -5,13 +5,30 @@ import (
 	"log"
 	"plandex-server/db"
 	"plandex-server/host"
+	"plandex-server/model"
 	"plandex-server/types"
+	"time"
 
-	"github.com/plandex/plandex/shared"
-	"github.com/sashabaranov/go-openai"
+	shared "plandex-shared"
 )
 
-func activatePlan(clients map[string]*openai.Client, plan *db.Plan, branch string, auth *types.ServerAuth, prompt string, buildOnly bool) (*types.ActivePlan, error) {
+func activatePlan(
+	clients map[string]model.ClientInfo,
+	plan *db.Plan,
+	branch string,
+	auth *types.ServerAuth,
+	prompt string,
+	buildOnly,
+	autoContext bool,
+	sessionId string,
+) (*types.ActivePlan, error) {
+	log.Printf("Activate plan: plan ID %s on branch %s\n", plan.Id, branch)
+
+	// Just in case this request was made immediately after another stream finished, wait a little to allow for cleanup
+	log.Println("Waiting 100ms before checking for active plan")
+	time.Sleep(100 * time.Millisecond)
+	log.Println("Done waiting, checking for active plan")
+
 	active := GetActivePlan(plan.Id, branch)
 	if active != nil {
 		log.Printf("Tell: Active plan found for plan ID %s on branch %s\n", plan.Id, branch) // Log if an active plan is found
@@ -29,7 +46,16 @@ func activatePlan(clients map[string]*openai.Client, plan *db.Plan, branch strin
 		return nil, fmt.Errorf("plan %s branch %s already has an active stream on host %s", plan.Id, branch, modelStream.InternalIp)
 	}
 
-	active = CreateActivePlan(auth.OrgId, auth.User.Id, plan.Id, branch, prompt, buildOnly)
+	active = CreateActivePlan(
+		auth.OrgId,
+		auth.User.Id,
+		plan.Id,
+		branch,
+		prompt,
+		buildOnly,
+		autoContext,
+		sessionId,
+	)
 
 	modelStream = &db.ModelStream{
 		OrgId:      auth.OrgId,

@@ -1,6 +1,9 @@
 package syntax
 
 import (
+	"path/filepath"
+	"strings"
+
 	tree_sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/bash"
 	"github.com/smacker/go-tree-sitter/c"
@@ -32,135 +35,125 @@ import (
 	"github.com/smacker/go-tree-sitter/typescript/tsx"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
 	"github.com/smacker/go-tree-sitter/yaml"
+
+	shared "plandex-shared"
 )
 
-func GetParserForExt(ext string) (*tree_sitter.Parser, string, *tree_sitter.Parser, string) {
-	lang, ok := languageByExtension[ext]
+func GetLanguageForPath(path string) shared.Language {
+	ext := filepath.Ext(path)
+	lang, ok := shared.LanguageByExtension[ext]
 	if !ok {
+		if strings.Contains(strings.ToLower(path), "dockerfile") {
+			return shared.LanguageDockerfile
+		}
+		if strings.Contains(strings.ToLower(path), "rakefile") {
+			return shared.LanguageRuby
+		}
+
+		if strings.Contains(strings.ToLower(path), "gemfile") {
+			return shared.LanguageRuby
+		}
+
+		if strings.Contains(strings.ToLower(path), "gemfile.lock") {
+			return shared.LanguageRuby
+		}
+
+		if strings.Contains(strings.ToLower(path), "gemspec") {
+			return shared.LanguageRuby
+		}
+
+		if strings.Contains(strings.ToLower(path), "guardfile") {
+			return shared.LanguageRuby
+		}
+
+		return ""
+	}
+	return lang
+}
+
+func GetParserForPath(path string) (*tree_sitter.Parser, shared.Language, *tree_sitter.Parser, shared.Language) {
+	lang := GetLanguageForPath(path)
+	if lang == "" {
 		return nil, "", nil, ""
 	}
 
-	parser := getParserForLanguage(lang)
+	parser := GetParserForLanguage(lang)
 
-	fallback := fallbackByExtension[ext]
+	ext := filepath.Ext(path)
+	fallback := shared.LanguageFallbackByExtension[ext]
 	var fallbackParser *tree_sitter.Parser
 	if fallback != "" {
-		fallbackParser = getParserForLanguage(fallback)
+		fallbackParser = GetParserForLanguage(fallback)
 	}
 
 	return parser, lang, fallbackParser, fallback
 }
 
-func getParserForLanguage(lang string) *tree_sitter.Parser {
+func GetParserForLanguage(lang shared.Language) *tree_sitter.Parser {
 	parser := tree_sitter.NewParser()
 	switch lang {
-	case "bash":
+	case shared.LanguageBash:
 		parser.SetLanguage(bash.GetLanguage())
-	case "c":
+	case shared.LanguageC:
 		parser.SetLanguage(c.GetLanguage())
-	case "cpp":
+	case shared.LanguageCpp:
 		parser.SetLanguage(cpp.GetLanguage())
-	case "csharp":
+	case shared.LanguageCsharp:
 		parser.SetLanguage(csharp.GetLanguage())
-	case "css":
+	case shared.LanguageCss:
 		parser.SetLanguage(css.GetLanguage())
-	case "cue":
+	case shared.LanguageCue:
 		parser.SetLanguage(cue.GetLanguage())
-	case "dockerfile":
+	case shared.LanguageDockerfile:
 		parser.SetLanguage(dockerfile.GetLanguage())
-	case "elixir":
+	case shared.LanguageElixir:
 		parser.SetLanguage(elixir.GetLanguage())
-	case "elm":
+	case shared.LanguageElm:
 		parser.SetLanguage(elm.GetLanguage())
-	case "go":
+	case shared.LanguageGo:
 		parser.SetLanguage(golang.GetLanguage())
-	case "groovy":
+	case shared.LanguageGroovy:
 		parser.SetLanguage(groovy.GetLanguage())
-	case "hcl":
+	case shared.LanguageHcl:
 		parser.SetLanguage(hcl.GetLanguage())
-	case "html":
+	case shared.LanguageHtml:
 		parser.SetLanguage(html.GetLanguage())
-	case "java":
+	case shared.LanguageJava:
 		parser.SetLanguage(java.GetLanguage())
-	case "javascript", "json":
+	case shared.LanguageJavascript, shared.LanguageJson:
 		parser.SetLanguage(javascript.GetLanguage())
-	case "kotlin":
+	case shared.LanguageKotlin:
 		parser.SetLanguage(kotlin.GetLanguage())
-	case "lua":
+	case shared.LanguageLua:
 		parser.SetLanguage(lua.GetLanguage())
-	case "ocaml":
+	case shared.LanguageOCaml:
 		parser.SetLanguage(ocaml.GetLanguage())
-	case "php":
+	case shared.LanguagePhp:
 		parser.SetLanguage(php.GetLanguage())
-	case "protobuf":
+	case shared.LanguageProtobuf:
 		parser.SetLanguage(protobuf.GetLanguage())
-	case "python":
+	case shared.LanguagePython:
 		parser.SetLanguage(python.GetLanguage())
-	case "ruby":
+	case shared.LanguageRuby:
 		parser.SetLanguage(ruby.GetLanguage())
-	case "rust":
+	case shared.LanguageRust:
 		parser.SetLanguage(rust.GetLanguage())
-	case "scala":
+	case shared.LanguageScala:
 		parser.SetLanguage(scala.GetLanguage())
-	case "svelte":
+	case shared.LanguageSvelte:
 		parser.SetLanguage(svelte.GetLanguage())
-	case "swift":
+	case shared.LanguageSwift:
 		parser.SetLanguage(swift.GetLanguage())
-	case "toml":
+	case shared.LanguageToml:
 		parser.SetLanguage(toml.GetLanguage())
-	case "typescript":
+	case shared.LanguageTypescript:
 		parser.SetLanguage(typescript.GetLanguage())
-	case "jsx", "tsx":
+	case shared.LanguageJsx, shared.LanguageTsx:
 		parser.SetLanguage(tsx.GetLanguage())
-	case "yaml":
+	case shared.LanguageYaml:
 		parser.SetLanguage(yaml.GetLanguage())
 	default:
 		return nil
 	}
 	return parser
-}
-
-var languageByExtension = map[string]string{
-	".sh":         "bash",
-	".bash":       "bash",
-	".c":          "c",
-	".h":          "c",
-	".cpp":        "cpp",
-	".cc":         "cpp",
-	".cs":         "csharp",
-	".css":        "css",
-	".cue":        "cue",
-	".dockerfile": "dockerfile",
-	".ex":         "elixir",
-	".exs":        "elixir",
-	".elm":        "elm",
-	".go":         "go",
-	".groovy":     "groovy",
-	".hcl":        "hcl",
-	".html":       "html",
-	".java":       "java",
-	".js":         "javascript",
-	".json":       "json",
-	".jsx":        "tsx",
-	".kt":         "kotlin",
-	".lua":        "lua",
-	".ml":         "ocaml",
-	".php":        "php",
-	".proto":      "protobuf",
-	".py":         "python",
-	".rb":         "ruby",
-	".rs":         "rust",
-	".scala":      "scala",
-	".svelte":     "svelte",
-	".swift":      "swift",
-	".toml":       "toml",
-	".ts":         "typescript",
-	".tsx":        "tsx",
-	".yaml":       "yaml",
-	".yml":        "yaml",
-}
-
-var fallbackByExtension = map[string]string{
-	".ts": "tsx",
-	".js": "tsx",
 }

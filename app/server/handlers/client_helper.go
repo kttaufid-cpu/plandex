@@ -3,32 +3,50 @@ package handlers
 import (
 	"log"
 	"net/http"
+	"os"
 	"plandex-server/db"
 	"plandex-server/hooks"
 	"plandex-server/model"
 	"plandex-server/types"
-
-	"github.com/sashabaranov/go-openai"
+	shared "plandex-shared"
 )
 
 type initClientsParams struct {
-	w           http.ResponseWriter
-	auth        *types.ServerAuth
-	apiKey      string
-	apiKeys     map[string]string
-	endpoint    string
-	openAIBase  string
-	openAIOrgId string
-	plan        *db.Plan
+	w    http.ResponseWriter
+	auth *types.ServerAuth
+
+	apiKeys     map[string]string // deprecated
+	openAIOrgId string            // deprecated
+
+	authVars map[string]string
+
+	plan          *db.Plan
+	settings      *shared.PlanSettings
+	orgUserConfig *shared.OrgUserConfig
 }
 
-func initClients(params initClientsParams) map[string]*openai.Client {
+type initClientsResult struct {
+	clients  map[string]model.ClientInfo
+	authVars map[string]string
+}
+
+func initClients(params initClientsParams) initClientsResult {
 	w := params.w
-	apiKey := params.apiKey
-	apiKeys := params.apiKeys
-	plan := params.plan
-	var openAIOrgId string
-	var endpoint string
+	settings := params.settings
+	orgUserConfig := params.orgUserConfig
+
+	authVars := map[string]string{}
+	if params.authVars != nil {
+		authVars = params.authVars
+	} else if params.apiKeys != nil {
+		authVars = map[string]string{}
+		for envVar, apiKey := range params.apiKeys {
+			authVars[envVar] = apiKey
+		}
+		if params.openAIOrgId != "" {
+			authVars["OPENAI_ORG_ID"] = params.openAIOrgId
+		}
+	}
 
 	hookResult, apiErr := hooks.ExecHook(hooks.GetIntegratedModels, hooks.HookParams{
 		Auth: params.auth,
@@ -38,80 +56,29 @@ func initClients(params initClientsParams) map[string]*openai.Client {
 	if apiErr != nil {
 		log.Printf("Error getting integrated models: %v\n", apiErr)
 		http.Error(w, "Error getting integrated models", http.StatusInternalServerError)
-		return nil
+		return initClientsResult{}
 	}
 
 	if hookResult.GetIntegratedModelsResult != nil && hookResult.GetIntegratedModelsResult.IntegratedModelsMode {
-		apiKeys = hookResult.GetIntegratedModelsResult.ApiKeys
-	} else {
-		if apiKeys == nil {
-			apiKeys = map[string]string{"OPENAI_API_KEY": apiKey}
+		merged := map[string]string{}
+		for k, v := range hookResult.GetIntegratedModelsResult.AuthVars {
+			merged[k] = v
 		}
-
-		openAIOrgId = params.openAIOrgId
-		endpoint = params.openAIBase
-		if endpoint == "" {
-			endpoint = params.endpoint
+		if authVars[shared.AnthropicClaudeMaxTokenEnvVar] != "" {
+			merged[shared.AnthropicClaudeMaxTokenEnvVar] = authVars[shared.AnthropicClaudeMaxTokenEnvVar]
 		}
+		authVars = merged
+	}
+	if len(authVars) == 0 && os.Getenv("IS_CLOUD") != "" {
+		log.Println("No api keys/credentials provided for models")
+		http.Error(w, "No api keys/credentials provided for models", http.StatusBadRequest)
+		return initClientsResult{}
 	}
 
-	planSettings, err := db.GetPlanSettings(plan, true)
-	if err != nil {
-		log.Printf("Error getting plan settings: %v\n", err)
-		http.Error(w, "Error getting plan settings", http.StatusInternalServerError)
-		return nil
+	clients := model.InitClients(authVars, settings, orgUserConfig)
+
+	return initClientsResult{
+		clients:  clients,
+		authVars: authVars,
 	}
-
-	endpointsByApiKeyEnvVar := map[string]string{}
-	for envVar := range apiKeys {
-		if planSettings.ModelPack.Planner.BaseModelConfig.ApiKeyEnvVar == envVar {
-			endpointsByApiKeyEnvVar[envVar] = planSettings.ModelPack.Planner.BaseModelConfig.BaseUrl
-			continue
-		}
-
-		if planSettings.ModelPack.PlanSummary.BaseModelConfig.ApiKeyEnvVar == envVar {
-			endpointsByApiKeyEnvVar[envVar] = planSettings.ModelPack.PlanSummary.BaseModelConfig.BaseUrl
-			continue
-		}
-
-		if planSettings.ModelPack.Builder.BaseModelConfig.ApiKeyEnvVar == envVar {
-			endpointsByApiKeyEnvVar[envVar] = planSettings.ModelPack.Builder.BaseModelConfig.BaseUrl
-			continue
-		}
-
-		if planSettings.ModelPack.Namer.BaseModelConfig.ApiKeyEnvVar == envVar {
-			endpointsByApiKeyEnvVar[envVar] = planSettings.ModelPack.Namer.BaseModelConfig.BaseUrl
-			continue
-		}
-
-		if planSettings.ModelPack.CommitMsg.BaseModelConfig.ApiKeyEnvVar == envVar {
-			endpointsByApiKeyEnvVar[envVar] = planSettings.ModelPack.CommitMsg.BaseModelConfig.BaseUrl
-			continue
-		}
-
-		if planSettings.ModelPack.ExecStatus.BaseModelConfig.ApiKeyEnvVar == envVar {
-			endpointsByApiKeyEnvVar[envVar] = planSettings.ModelPack.ExecStatus.BaseModelConfig.BaseUrl
-			continue
-		}
-
-		if planSettings.ModelPack.GetVerifier().BaseModelConfig.ApiKeyEnvVar == envVar {
-			endpointsByApiKeyEnvVar[envVar] = planSettings.ModelPack.GetVerifier().BaseModelConfig.BaseUrl
-			continue
-		}
-
-		if planSettings.ModelPack.GetAutoFix().BaseModelConfig.ApiKeyEnvVar == envVar {
-			endpointsByApiKeyEnvVar[envVar] = planSettings.ModelPack.GetAutoFix().BaseModelConfig.BaseUrl
-			continue
-		}
-	}
-
-	if len(apiKeys) == 0 {
-		log.Println("API key is required")
-		http.Error(w, "API key is required", http.StatusBadRequest)
-		return nil
-	}
-
-	clients := model.InitClients(apiKeys, endpointsByApiKeyEnvVar, endpoint, openAIOrgId)
-
-	return clients
 }

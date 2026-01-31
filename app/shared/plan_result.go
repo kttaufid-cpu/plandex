@@ -23,7 +23,7 @@ func (res *PlanFileResult) NumPendingReplacements() int {
 }
 
 func (res *PlanFileResult) IsPending() bool {
-	return res.AppliedAt == nil && res.RejectedAt == nil && (res.Content != "" || res.NumPendingReplacements() > 0)
+	return res.AppliedAt == nil && res.RejectedAt == nil && (res.Content != "" || res.NumPendingReplacements() > 0 || res.RemovedFile)
 }
 
 func (p PlanFileResultsByPath) SetApplied(t time.Time) {
@@ -93,13 +93,13 @@ func (p PlanFileResultsByPath) ConflictedPaths(filesByPath map[string]string) ma
 
 			maybeWithLineNums := updated
 			if res.ReplaceWithLineNums {
-				maybeWithLineNums = AddLineNums(updated)
+				maybeWithLineNums = string(AddLineNums(updated))
 			}
 
 			var succeeded bool
 			updated, succeeded = ApplyReplacements(maybeWithLineNums, res.Replacements, false)
 
-			updated = RemoveLineNums(updated)
+			updated = RemoveLineNums(LineNumberedTextType(updated))
 
 			// log.Println("updated:", updated)
 			// log.Println("succeeded:", succeeded)
@@ -133,9 +133,9 @@ func (r PlanResult) NumPendingForPath(path string) int {
 
 func (desc *ConvoMessageDescription) NumBuildsPendingByPath() map[string]int {
 	res := map[string]int{}
-	if (!desc.DidBuild && len(desc.Files) > 0) || len(desc.BuildPathsInvalidated) > 0 {
-		for _, file := range desc.Files {
-			res[file]++
+	if (!desc.DidBuild && len(desc.Operations) > 0) || len(desc.BuildPathsInvalidated) > 0 {
+		for _, op := range desc.Operations {
+			res[op.Path]++
 		}
 	}
 	return res

@@ -2,24 +2,25 @@ package plan
 
 import (
 	"plandex-server/db"
+	"plandex-server/hooks"
+	"plandex-server/model"
 	"plandex-server/types"
 
-	"github.com/plandex/plandex/shared"
-	"github.com/sashabaranov/go-openai"
+	shared "plandex-shared"
+
 	sitter "github.com/smacker/go-tree-sitter"
 )
 
 const MaxBuildErrorRetries = 3 // uses semi-exponential backoff so be careful with this
 
-const FixSyntaxRetries = 2
-const FixSyntaxEpochs = 2
-
 type activeBuildStreamState struct {
-	tellState     *activeTellStreamState
-	clients       map[string]*openai.Client
+	modelStreamId string
+	clients       map[string]model.ClientInfo
+	authVars      map[string]string
 	auth          *types.ServerAuth
 	currentOrgId  string
 	currentUserId string
+	orgUserConfig *shared.OrgUserConfig
 	plan          *db.Plan
 	branch        string
 	settings      *shared.PlanSettings
@@ -36,28 +37,13 @@ type activeBuildStreamFileState struct {
 	activeBuild                *types.ActiveBuild
 	preBuildState              string
 	parser                     *sitter.Parser
-	language                   string
+	language                   shared.Language
+	syntaxCheckTimedOut        bool
 	preBuildStateSyntaxInvalid bool
+	validationNumRetry         int
+	wholeFileNumRetry          int
+	isNewFile                  bool
+	contextPart                *db.Context
 
-	structuredEditNumRetry int
-	expandRefsNumRetry     int
-	lineNumsNumRetry       int
-	verifyFileNumRetry     int
-	fixFileNumRetry        int
-
-	syntaxNumRetry int
-	syntaxNumEpoch int
-
-	isFixingSyntax bool
-	isFixingOther  bool
-
-	streamedChangesWithLineNums []*shared.StreamedChangeWithLineNums
-	updated                     string
-
-	verificationErrors string
-	syntaxErrors       []string
-
-	isNewFile bool
-
-	inputTokens int
+	builderRun hooks.DidFinishBuilderRunParams
 }

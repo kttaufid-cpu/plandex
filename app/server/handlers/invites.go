@@ -2,18 +2,32 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"plandex-server/db"
 	"plandex-server/email"
 	"strings"
 
+	shared "plandex-shared"
+
 	"github.com/gorilla/mux"
-	"github.com/plandex/plandex/shared"
+	"github.com/jmoiron/sqlx"
 )
 
 func InviteUserHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("Received a request for InviteUserHandler")
+
+	if os.Getenv("GOENV") == "development" && os.Getenv("LOCAL_MODE") == "1" {
+		writeApiError(w, shared.ApiError{
+			Type:   shared.ApiErrorTypeOther,
+			Status: http.StatusForbidden,
+			Msg:    "Local mode is not supported for invites",
+		})
+		return
+	}
+
 	auth := Authenticate(w, r, true)
 	if auth == nil {
 		return
@@ -111,52 +125,34 @@ func InviteUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// start a transaction
-	tx, err := db.Conn.Beginx()
-	if err != nil {
-		log.Printf("Error starting transaction: %v\n", err)
-		http.Error(w, "Error starting transaction: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+	err = db.WithTx(r.Context(), "invite user", func(tx *sqlx.Tx) error {
 
-	// Ensure that rollback is attempted in case of failure
-	defer func() {
+		err = db.CreateInvite(&db.Invite{
+			OrgId:     auth.OrgId,
+			OrgRoleId: req.OrgRoleId,
+			Email:     req.Email,
+			Name:      req.Name,
+			InviterId: currentUserId,
+		}, tx)
+
 		if err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil {
-				log.Printf("transaction rollback error: %v\n", rbErr)
-			} else {
-				log.Println("transaction rolled back")
-			}
+			log.Printf("Error creating invite: %v\n", err)
+			return fmt.Errorf("error creating invite: %v", err)
 		}
-	}()
 
-	err = db.CreateInvite(&db.Invite{
-		OrgId:     auth.OrgId,
-		OrgRoleId: req.OrgRoleId,
-		Email:     req.Email,
-		Name:      req.Name,
-		InviterId: currentUserId,
-	}, tx)
+		err = email.SendInviteEmail(req.Email, req.Name, auth.User.Name, org.Name)
 
-	if err != nil {
-		log.Printf("Error creating invite: %v\n", err)
-		http.Error(w, "Error creating invite: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+		if err != nil {
+			log.Printf("Error sending invite email: %v\n", err)
+			return fmt.Errorf("error sending invite email: %v", err)
+		}
 
-	err = email.SendInviteEmail(req.Email, req.Name, auth.User.Name, org.Name)
+		return nil
+	})
 
 	if err != nil {
-		log.Printf("Error sending invite email: %v\n", err)
-		http.Error(w, "Error sending invite email: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// commit transaction
-	err = tx.Commit()
-	if err != nil {
-		log.Printf("Error committing transaction: %v\n", err)
-		http.Error(w, "Error committing transaction: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("Error inviting user: %v\n", err)
+		http.Error(w, "Error inviting user: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -165,6 +161,16 @@ func InviteUserHandler(w http.ResponseWriter, r *http.Request) {
 
 func ListPendingInvitesHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("Received a request for ListInvitesHandler")
+
+	if os.Getenv("GOENV") == "development" && os.Getenv("LOCAL_MODE") == "1" {
+		writeApiError(w, shared.ApiError{
+			Type:   shared.ApiErrorTypeOther,
+			Status: http.StatusForbidden,
+			Msg:    "Local mode is not supported for invites",
+		})
+		return
+	}
+
 	auth := Authenticate(w, r, true)
 	if auth == nil {
 		return
@@ -213,6 +219,16 @@ func ListPendingInvitesHandler(w http.ResponseWriter, r *http.Request) {
 
 func ListAcceptedInvitesHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("Received a request for ListAcceptedInvitesHandler")
+
+	if os.Getenv("GOENV") == "development" && os.Getenv("LOCAL_MODE") == "1" {
+		writeApiError(w, shared.ApiError{
+			Type:   shared.ApiErrorTypeOther,
+			Status: http.StatusForbidden,
+			Msg:    "Local mode is not supported for invites",
+		})
+		return
+	}
+
 	auth := Authenticate(w, r, true)
 	if auth == nil {
 		return
@@ -261,6 +277,16 @@ func ListAcceptedInvitesHandler(w http.ResponseWriter, r *http.Request) {
 
 func ListAllInvitesHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("Received a request for ListAllInvitesHandler")
+
+	if os.Getenv("GOENV") == "development" && os.Getenv("LOCAL_MODE") == "1" {
+		writeApiError(w, shared.ApiError{
+			Type:   shared.ApiErrorTypeOther,
+			Status: http.StatusForbidden,
+			Msg:    "Local mode is not supported for invites",
+		})
+		return
+	}
+
 	auth := Authenticate(w, r, true)
 	if auth == nil {
 		return
@@ -309,6 +335,16 @@ func ListAllInvitesHandler(w http.ResponseWriter, r *http.Request) {
 
 func DeleteInviteHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("Received a request for DeleteInviteHandler")
+
+	if os.Getenv("GOENV") == "development" && os.Getenv("LOCAL_MODE") == "1" {
+		writeApiError(w, shared.ApiError{
+			Type:   shared.ApiErrorTypeOther,
+			Status: http.StatusForbidden,
+			Msg:    "Local mode is not supported for invites",
+		})
+		return
+	}
+
 	auth := Authenticate(w, r, true)
 	if auth == nil {
 		return
