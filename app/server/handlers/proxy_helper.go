@@ -49,12 +49,12 @@ func proxyActivePlanMethod(w http.ResponseWriter, r *http.Request, planId, branc
 		proxyUrl += "?proxy=true"
 
 		log.Printf("Proxy url: %s\n", proxyUrl)
-		proxyRequest(w, r, proxyUrl)
+		ProxyRequest(w, r, proxyUrl)
 		return
 	}
 }
 
-func proxyRequest(w http.ResponseWriter, originalRequest *http.Request, url string) {
+func ProxyRequest(w http.ResponseWriter, originalRequest *http.Request, url string) {
 	client := &http.Client{
 		Timeout: time.Second * 10,
 	}

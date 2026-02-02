@@ -8,7 +8,7 @@ import (
 )
 
 func GetPlanSubtasks(orgId, planId string) ([]*Subtask, error) {
-	planDir := getPlanDir(orgId, planId)
+	planDir := GetPlanDir(orgId, planId)
 	subtasksPath := filepath.Join(planDir, "subtasks.json")
 
 	bytes, err := os.ReadFile(subtasksPath)
@@ -32,7 +32,7 @@ func GetPlanSubtasks(orgId, planId string) ([]*Subtask, error) {
 }
 
 func StorePlanSubtasks(orgId, planId string, subtasks []*Subtask) error {
-	planDir := getPlanDir(orgId, planId)
+	planDir := GetPlanDir(orgId, planId)
 
 	bytes, err := json.Marshal(subtasks)
 

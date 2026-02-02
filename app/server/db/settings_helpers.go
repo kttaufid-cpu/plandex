@@ -15,7 +15,7 @@ import (
 )
 
 func GetPlanSettings(plan *Plan) (settings *shared.PlanSettings, err error) {
-	planDir := getPlanDir(plan.OrgId, plan.Id)
+	planDir := GetPlanDir(plan.OrgId, plan.Id)
 	settingsPath := filepath.Join(planDir, "settings.json")
 
 	result, err := GetApiCustomModels(plan.OrgId)
@@ -70,7 +70,7 @@ func GetPlanSettings(plan *Plan) (settings *shared.PlanSettings, err error) {
 }
 
 func StorePlanSettings(plan *Plan, settings shared.PlanSettings) error {
-	planDir := getPlanDir(plan.OrgId, plan.Id)
+	planDir := GetPlanDir(plan.OrgId, plan.Id)
 	settingsPath := filepath.Join(planDir, "settings.json")
 
 	settings.UpdatedAt = time.Now()

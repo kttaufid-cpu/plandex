@@ -30,13 +30,10 @@ def _oauth_get_hdrs(
   )
 
   # remove x-api-key when we detect an OAuth access-token
-  print(f"api_key: {api_key}")
   if api_key and api_key.startswith(("sk-ant-oat", "sk-ant-oau")):
     hdrs["anthropic-beta"] = "oauth-2025-04-20"
     hdrs["anthropic-product"] = "claude-code"
     hdrs.pop("x-api-key", None)
-
-  print(f"Anthropic headers: {hdrs}")
 
   return hdrs
 

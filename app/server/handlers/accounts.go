@@ -20,9 +20,10 @@ import (
 func CreateAccountHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("Received request for CreateAccountHandler")
 
-	if os.Getenv("IS_CLOUD") != "" {
-		log.Println("Creating accounts is not supported in cloud mode")
-		http.Error(w, "Creating accounts is not supported in cloud mode", http.StatusNotImplemented)
+	// Only block account creation in production cloud mode, allow in development
+	if os.Getenv("IS_CLOUD") != "" && os.Getenv("GOENV") == "production" {
+		log.Println("Creating accounts is not supported in production cloud mode")
+		http.Error(w, "Creating accounts is not supported in production cloud mode", http.StatusNotImplemented)
 		return
 	}
 
