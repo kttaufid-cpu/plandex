@@ -9,11 +9,6 @@ import (
 	"github.com/fatih/color"
 )
 
-const (
-	AuthTrialOption   = "Start a trial on Plandex Cloud"
-	AuthAccountOption = "Sign in, accept an invite, or create an account"
-)
-
 const AddAccountOption = "Add another account"
 
 func SelectOrSignInOrCreate() error {
@@ -131,35 +126,25 @@ func SignInWithCode(code, host string) error {
 }
 
 func promptInitialAuth() error {
-	selected, err := term.SelectFromList("👋 Hey there!\nIt looks like this is your first time using Plandex on this computer.\nWhat would you like to do?", []string{AuthTrialOption, AuthAccountOption})
+	fmt.Println("👋 Hey there!\nIt looks like this is your first time using Plandex on this computer.")
+
+	err := SelectOrSignInOrCreate()
 
 	if err != nil {
-		return fmt.Errorf("error selecting auth option: %v", err)
-	}
-
-	switch selected {
-	case AuthTrialOption:
-		startTrial()
-
-	case AuthAccountOption:
-		err = SelectOrSignInOrCreate()
-
-		if err != nil {
-			return fmt.Errorf("error selecting or signing in to account: %v", err)
-		}
+		return fmt.Errorf("error selecting or signing in to account: %v", err)
 	}
 
 	return nil
 }
 
 const (
-	SignInCloudOption = "Plandex Cloud"
+	// SignInCloudOption = "Plandex Cloud"
 	SignInLocalOption = "Local mode host"
 	SignInOtherOption = "Another host"
 )
 
 func promptSignInNewAccount() error {
-	selected, err := term.SelectFromList("Use Plandex Cloud or another host?", []string{SignInCloudOption, SignInLocalOption, SignInOtherOption})
+	selected, err := term.SelectFromList("Use local mode or another host?", []string{SignInLocalOption, SignInOtherOption})
 
 	if err != nil {
 		return fmt.Errorf("error selecting sign in option: %v", err)
@@ -168,32 +153,24 @@ func promptSignInNewAccount() error {
 	var host string
 	var email string
 
-	if selected == SignInCloudOption {
-		email, err = term.GetRequiredUserStringInput("Your email:")
-
-		if err != nil {
-			return fmt.Errorf("error prompting email: %v", err)
-		}
+	if selected == SignInLocalOption {
+		host, err = term.GetRequiredUserStringInputWithDefault("Host:", "http://localhost:8099")
 	} else {
-		if selected == SignInLocalOption {
-			host, err = term.GetRequiredUserStringInputWithDefault("Host:", "http://localhost:8099")
-		} else {
-			host, err = term.GetRequiredUserStringInput("Host:")
-		}
+		host, err = term.GetRequiredUserStringInput("Host:")
+	}
 
-		if err != nil {
-			return fmt.Errorf("error prompting host: %v", err)
-		}
+	if err != nil {
+		return fmt.Errorf("error prompting host: %v", err)
+	}
 
-		if selected == SignInLocalOption {
-			email = "local-admin@plandex.ai"
-		} else {
-			email, err = term.GetRequiredUserStringInput("Your email:")
-		}
+	if selected == SignInLocalOption {
+		email = "local-admin@plandex.ai"
+	} else {
+		email, err = term.GetRequiredUserStringInput("Your email:")
+	}
 
-		if err != nil {
-			return fmt.Errorf("error prompting email: %v", err)
-		}
+	if err != nil {
+		return fmt.Errorf("error prompting email: %v", err)
 	}
 
 	res, err := verifyEmail(email, host)

@@ -22,7 +22,9 @@ func OpenAuthenticatedURL(msg, path string) {
 	}
 
 	apiHost := api.GetApiHost()
+	appHost := strings.Replace(apiHost, "api", "app", 1)
 	appHost := strings.Replace(apiHost, "api-v2.", "app.", 1)
+	appHost = strings.Replace(appHost, "api.", "app.", 1)
 
 	token := shared.UiSignInToken{
 		Pin:        signInCode,
@@ -43,6 +45,7 @@ func OpenAuthenticatedURL(msg, path string) {
 
 func OpenUnauthenticatedCloudURL(msg, path string) {
 	apiHost := api.GetApiHost()
+	appHost := strings.Replace(apiHost, "api", "app", 1)
 	appHost := strings.Replace(apiHost, "api-v2.", "app.", 1)
 
 	url := fmt.Sprintf("%s%s", appHost, path)

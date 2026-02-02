@@ -27,11 +27,27 @@ type ExtendedChatMessagePart struct {
 }
 
 type ExtendedChatMessage struct {
-	Role    string                    `json:"role"`
-	Content []ExtendedChatMessagePart `json:"content"`
+	Role       string                    `json:"role"`
+	Content    []ExtendedChatMessagePart `json:"content"`
+	ToolCallID string                    `json:"tool_call_id,omitempty"` // For tool response messages
+	Name       string                    `json:"name,omitempty"`         // Tool/function name for tool messages
 }
 
 func (msg *ExtendedChatMessage) ToOpenAI() *openai.ChatCompletionMessage {
+	// Handle tool response messages
+	if msg.Role == "tool" {
+		var content string
+		if len(msg.Content) > 0 && msg.Content[0].Type == "text" {
+			content = msg.Content[0].Text
+		}
+		return &openai.ChatCompletionMessage{
+			Role:       msg.Role,
+			Content:    content,
+			ToolCallID: msg.ToolCallID,
+			Name:       msg.Name,
+		}
+	}
+
 	// If there's only one part and it's text, use simple Content field
 	if len(msg.Content) == 1 && msg.Content[0].Type == "text" {
 		return &openai.ChatCompletionMessage{
@@ -130,11 +146,32 @@ type ExtendedChatCompletionRequest struct {
 	Prediction *OpenAIPrediction         `json:"prediction,omitempty"`
 	Provider   *OpenRouterProviderConfig `json:"provider,omitempty"`
 
+	// LiteLLM api base
+	LiteLLMApiBase           string `json:"api_base,omitempty"`
+	LiteLLMBaseUrl           string `json:"base_url,omitempty"`
+	LiteLLMCustomLLMProvider string `json:"custom_llm_provider,omitempty"`
+
 	// Openrouter/LiteLLM reasoning
 	ReasoningConfig *ReasoningConfig `json:"reasoning,omitempty"`
 
-	// Openrouter ignore providers
+	// Headers that pass through to LiteLLM proxy
+	ExtraHeaders map[string]string `json:"extra_headers,omitempty"`
 
+	// Vertex request vars
+	VertexProject     string `json:"vertex_project,omitempty"`
+	VertexLocation    string `json:"vertex_location,omitempty"`
+	VertexCredentials string `json:"vertex_credentials,omitempty"`
+
+	// Azure OpenAI request vars
+	AzureApiVersion      string                 `json:"api_version,omitempty"`
+	AzureReasoningEffort shared.ReasoningEffort `json:"reasoning_effort,omitempty"`
+
+	// AWS Bedrock request vars
+	BedrockAccessKeyId         string `json:"aws_access_key_id,omitempty"`
+	BedrockSecretAccessKey     string `json:"aws_secret_access_key,omitempty"`
+	BedrockSessionToken        string `json:"aws_session_token,omitempty"`
+	BedrockRegion              string `json:"aws_region_name,omitempty"`
+	BedrockInferenceProfileArn string `json:"aws_inference_profile_arn,omitempty"`
 }
 
 // for properties that OpenAI direct api calls support but aren't included in https://github.com/sashabaranov/go-openai
@@ -233,33 +270,56 @@ type ExtendedChatCompletionStreamResponse struct {
 
 // ModelResponse holds both the accumulated content and final usage information from a streaming completion request
 type ModelResponse struct {
-	Content      string        `json:"content"`
-	Usage        *openai.Usage `json:"usage,omitempty"`
-	Stopped      bool          `json:"stopped,omitempty"`
-	Error        string        `json:"error,omitempty"`
-	GenerationId string        `json:"generation_id,omitempty"`
-	FirstTokenAt time.Time     `json:"first_token_at,omitempty"`
+	ToolCallContent map[string]string `json:"tool_call_content,omitempty"`
+	TextContent     string            `json:"text_content,omitempty"`
+	Usage           *openai.Usage     `json:"usage,omitempty"`
+	Stopped         bool              `json:"stopped,omitempty"`
+	Error           string            `json:"error,omitempty"`
+	GenerationId    string            `json:"generation_id,omitempty"`
+	FirstTokenAt    time.Time         `json:"first_token_at,omitempty"`
+}
+
+func (r *ModelResponse) AllContent() string {
+	content := r.TextContent
+	for _, toolCallContent := range r.ToolCallContent {
+		content += toolCallContent
+	}
+	return content
+}
+
+func (r *ModelResponse) GetNumTokensEstimate() int {
+	return shared.GetNumTokensEstimate(r.AllContent())
 }
 
 // StreamCompletionAccumulator accumulates content and tracks usage from streaming chunks
 type StreamCompletionAccumulator struct {
-	content      strings.Builder
-	usage        *openai.Usage
-	generationId string
-	firstTokenAt time.Time
+	textContent     strings.Builder
+	toolCallContent map[string]*strings.Builder
+	usage           *openai.Usage
+	generationId    string
+	firstTokenAt    time.Time
 }
 
 // NewStreamCompletionAccumulator creates a new StreamCompletionAccumulator
 func NewStreamCompletionAccumulator() *StreamCompletionAccumulator {
 	return &StreamCompletionAccumulator{
-		content: strings.Builder{},
-		usage:   nil,
+		textContent:     strings.Builder{},
+		toolCallContent: map[string]*strings.Builder{},
+		usage:           nil,
 	}
 }
 
-// AddContent appends new content from a streaming chunk
-func (a *StreamCompletionAccumulator) AddContent(content string) {
-	a.content.WriteString(content)
+func (a *StreamCompletionAccumulator) AddTextContent(textContent string) {
+	a.textContent.WriteString(textContent)
+}
+
+func (a *StreamCompletionAccumulator) AddToolCallContent(toolName string, content string) {
+	builder, ok := a.toolCallContent[toolName]
+	if !ok {
+		builder = &strings.Builder{}
+		a.toolCallContent[toolName] = builder
+	}
+	builder.WriteString(content)
 }
 
 // SetUsage sets the usage information, typically from the final chunk
@@ -275,8 +335,16 @@ func (a *StreamCompletionAccumulator) SetFirstTokenAt(firstTokenAt time.Time) {
 	a.firstTokenAt = firstTokenAt
 }
 
-func (a *StreamCompletionAccumulator) Content() string {
-	return a.content.String()
+func (a *StreamCompletionAccumulator) TextContent() string {
+	return a.textContent.String()
+}
+
+func (a *StreamCompletionAccumulator) ToolCallContent() map[string]string {
+	toolCallContent := map[string]string{}
+	for toolName, content := range a.toolCallContent {
+		toolCallContent[toolName] = content.String()
+	}
+	return toolCallContent
 }
 
 // Result creates a StreamCompletionResult from the accumulated content and usage
@@ -286,12 +354,18 @@ func (a *StreamCompletionAccumulator) Result(stopped bool, err error) *ModelResp
 		errStr = err.Error()
 	}
 
+	toolCallContent := map[string]string{}
+	for toolName, content := range a.toolCallContent {
+		toolCallContent[toolName] = content.String()
+	}
+
 	return &ModelResponse{
-		Content:      a.content.String(),
-		Usage:        a.usage,
-		Stopped:      stopped,
-		Error:        errStr,
-		GenerationId: a.generationId,
-		FirstTokenAt: a.firstTokenAt,
+		TextContent:     a.textContent.String(),
+		ToolCallContent: toolCallContent,
+		Usage:           a.usage,
+		Stopped:         stopped,
+		Error:           errStr,
+		GenerationId:    a.generationId,
+		FirstTokenAt:    a.firstTokenAt,
 	}
 }

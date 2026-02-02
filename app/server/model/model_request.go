@@ -13,15 +13,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/sashabaranov/go-openai"
 )
 
 type ModelRequestParams struct {
-	Clients     map[string]ClientInfo
-	Auth        *types.ServerAuth
-	Plan        *db.Plan
-	ModelConfig *shared.ModelRoleConfig
-	Purpose     string
+	Clients       map[string]ClientInfo
+	AuthVars      map[string]string
+	Auth          *types.ServerAuth
+	Plan          *db.Plan
+	ModelConfig   *shared.ModelRoleConfig
+	Settings      *shared.PlanSettings
+	OrgUserConfig *shared.OrgUserConfig
+	Purpose       string
 
 	Messages   []types.ExtendedChatMessage
 	Prediction string
@@ -40,7 +44,7 @@ type ModelRequestParams struct {
 	BeforeReq func()
 	AfterReq  func()
 
-	OnStream func(string, string) bool
+	OnStream func(string, string, map[string]string, map[string]string) bool
 
 	WillCacheNumTokens int
 }
@@ -50,6 +54,7 @@ func ModelRequest(
 	params ModelRequestParams,
 ) (*types.ModelResponse, error) {
 	clients := params.Clients
+	authVars := params.AuthVars
 	auth := params.Auth
 	plan := params.Plan
 	messages := params.Messages
@@ -64,26 +69,37 @@ func ModelRequest(
 	modelPackName := params.ModelPackName
 	purpose := params.Purpose
 	sessionId := params.SessionId
+	settings := params.Settings
+	orgUserConfig := params.OrgUserConfig
+	currentOrgId := auth.OrgId
+	currentUserId := auth.User.Id
 
 	if purpose == "" {
 		return nil, fmt.Errorf("purpose is required")
 	}
 
+	baseModelConfig := modelConfig.GetBaseModelConfig(authVars, settings, orgUserConfig)
+
 	messages = FilterEmptyMessages(messages)
-	messages = CheckSingleSystemMessage(modelConfig, messages)
+	messages = CheckSingleSystemMessage(modelConfig, baseModelConfig, messages)
 	inputTokensEstimate := GetMessagesTokenEstimate(messages...) + TokensPerRequest
 
-	config := modelConfig.GetRoleForInputTokens(inputTokensEstimate)
+	config := modelConfig.GetRoleForInputTokens(inputTokensEstimate, settings)
 	modelConfig = &config
 
 	if params.EstimatedOutputTokens != 0 {
-		config = modelConfig.GetRoleForOutputTokens(params.EstimatedOutputTokens)
+		config = modelConfig.GetRoleForOutputTokens(params.EstimatedOutputTokens, settings)
 		modelConfig = &config
 	}
 
-	log.Printf("Model config - role: %s, model: %s, max output tokens: %d\n", modelConfig.Role, modelConfig.BaseModelConfig.ModelName, modelConfig.BaseModelConfig.MaxOutputTokens)
+	log.Println("ModelRequest - modelConfig:")
+	spew.Dump(modelConfig)
+	log.Println("ModelRequest - baseModelConfig:")
+	spew.Dump(baseModelConfig)
 
-	expectedOutputTokens := modelConfig.BaseModelConfig.MaxOutputTokens - inputTokensEstimate
+	log.Printf("Model config - role: %s, model: %s, max output tokens: %d\n", modelConfig.Role, baseModelConfig.ModelName, baseModelConfig.MaxOutputTokens)
+
+	expectedOutputTokens := baseModelConfig.MaxOutputTokens - inputTokensEstimate
 	if params.EstimatedOutputTokens != 0 {
 		expectedOutputTokens = params.EstimatedOutputTokens
 	}
@@ -94,7 +110,9 @@ func ModelRequest(
 		WillSendModelRequestParams: &hooks.WillSendModelRequestParams{
 			InputTokens:  inputTokensEstimate,
 			OutputTokens: expectedOutputTokens,
-			ModelName:    modelConfig.BaseModelConfig.ModelName,
+			ModelName:    baseModelConfig.ModelName,
+			ModelId:      baseModelConfig.ModelId,
+			ModelTag:     baseModelConfig.ModelTag,
 		},
 	})
 
@@ -109,11 +127,11 @@ func ModelRequest(
 	reqStarted := time.Now()
 
 	req := types.ExtendedChatCompletionRequest{
-		Model:    modelConfig.BaseModelConfig.ModelName,
+		Model:    baseModelConfig.ModelName,
 		Messages: messages,
 	}
 
-	if !modelConfig.BaseModelConfig.RoleParamsDisabled {
+	if !baseModelConfig.RoleParamsDisabled {
 		req.Temperature = modelConfig.Temperature
 		req.TopP = modelConfig.TopP
 	}
@@ -127,16 +145,16 @@ func ModelRequest(
 	}
 
 	onStream := params.OnStream
-	if modelConfig.BaseModelConfig.StopDisabled {
+	if baseModelConfig.StopDisabled {
 		if len(stop) > 0 {
-			onStream = func(chunk string, buffer string) (shouldStop bool) {
+			onStream = func(chunk string, buffer string, toolCallChunks map[string]string, toolCallBuffers map[string]string) (shouldStop bool) {
 				for _, stopSequence := range stop {
 					if strings.Contains(buffer, stopSequence) {
 						return true
 					}
 				}
 				if params.OnStream != nil {
-					return params.OnStream(chunk, buffer)
+					return params.OnStream(chunk, buffer, toolCallChunks, toolCallBuffers)
 				}
 				return false
 			}
@@ -152,23 +170,23 @@ func ModelRequest(
 		}
 	}
 
-	res, err := CreateChatCompletionWithInternalStream(clients, modelConfig, ctx, req, onStream, reqStarted)
+	res, err := CreateChatCompletionWithInternalStream(clients, authVars, modelConfig, settings, orgUserConfig, currentOrgId, currentUserId, ctx, req, onStream, reqStarted)
 
 	if err != nil {
 		return nil, err
 	}
 
-	if modelConfig.BaseModelConfig.StopDisabled && len(stop) > 0 {
-		earliest := len(res.Content)
+	if baseModelConfig.StopDisabled && len(stop) > 0 {
+		earliest := len(res.TextContent)
 		found := false
 		for _, s := range stop {
-			if i := strings.Index(res.Content, s); i != -1 && i < earliest {
+			if i := strings.Index(res.TextContent, s); i != -1 && i < earliest {
 				earliest = i
 				found = true
 			}
 		}
 		if found {
-			res.Content = res.Content[:earliest]
+			res.TextContent = res.TextContent[:earliest]
 		}
 	}
 
@@ -190,7 +208,7 @@ func ModelRequest(
 		outputTokens = res.Usage.CompletionTokens
 	} else {
 		inputTokens = inputTokensEstimate
-		outputTokens = shared.GetNumTokensEstimate(res.Content)
+		outputTokens = res.GetNumTokensEstimate()
 
 		if params.WillCacheNumTokens > 0 {
 			cachedTokens = params.WillCacheNumTokens
@@ -212,9 +230,10 @@ func ModelRequest(
 				InputTokens:    inputTokens,
 				OutputTokens:   outputTokens,
 				CachedTokens:   cachedTokens,
-				ModelId:        modelConfig.BaseModelConfig.ModelId,
-				ModelName:      modelConfig.BaseModelConfig.ModelName,
-				ModelProvider:  modelConfig.BaseModelConfig.Provider,
+				ModelId:        baseModelConfig.ModelId,
+				ModelTag:       baseModelConfig.ModelTag,
+				ModelName:      baseModelConfig.ModelName,
+				ModelProvider:  baseModelConfig.Provider,
 				ModelPackName:  modelPackName,
 				ModelRole:      modelConfig.Role,
 				Purpose:        purpose,
@@ -227,7 +246,7 @@ func ModelRequest(
 				RequestStartedAt: reqStarted,
 				Streaming:        true,
 				Req:              &req,
-				StreamResult:     res.Content,
+				StreamResult:     res.AllContent(),
 				ModelConfig:      modelConfig,
 				FirstTokenAt:     res.FirstTokenAt,
 				SessionId:        sessionId,
@@ -262,8 +281,8 @@ func FilterEmptyMessages(messages []types.ExtendedChatMessage) []types.ExtendedC
 	return filteredMessages
 }
 
-func CheckSingleSystemMessage(modelConfig *shared.ModelRoleConfig, messages []types.ExtendedChatMessage) []types.ExtendedChatMessage {
-	if len(messages) == 1 && modelConfig.BaseModelConfig.SingleMessageNoSystemPrompt {
+func CheckSingleSystemMessage(modelConfig *shared.ModelRoleConfig, baseModelConfig *shared.BaseModelConfig, messages []types.ExtendedChatMessage) []types.ExtendedChatMessage {
+	if len(messages) == 1 && baseModelConfig.SingleMessageNoSystemPrompt {
 		if messages[0].Role == openai.ChatMessageRoleSystem {
 			msg := messages[0]
 			msg.Role = openai.ChatMessageRoleUser
